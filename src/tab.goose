@@ -179,12 +179,28 @@ fn selection_line(t: Tab&, line: i64) {
     t.sel_col = t.term.cols - 1;
 }
 
-fn is_selected(t: Tab&, line: i64, col: i64) -> bool {
-    if !t.sel_active { return false; }
-    let l0, c0, l1, c1 = order(t);
+// Whether a cell falls inside an already-ordered selection. The renderer
+// resolves the order once per frame and calls this for every cell, instead of
+// recomputing it per cell.
+fn cell_in_range(active: bool, l0: i64, c0: i64, l1: i64, c1: i64,
+                 line: i64, col: i64) -> bool {
+    if !active { return false; }
     if cell_le(line, col, l0, c0) { return line == l0 && col == c0; }
     if cell_le(l1, c1, line, col) { return line == l1 && col == c1; }
     return true;
+}
+
+fn is_selected(t: Tab&, line: i64, col: i64) -> bool {
+    if !t.sel_active { return false; }
+    let l0, c0, l1, c1 = order(t);
+    return cell_in_range(true, l0, c0, l1, c1, line, col);
+}
+
+// The absolute line drawn on the viewport's top row. Sub-line scrolling
+// exposes one extra line above `scroll`.
+fn first_line(t: Tab&) -> i64 {
+    if t.term.alt_active { return t.term.hist_count; }
+    return t.term.hist_count - t.scroll - (if t.scroll_frac > 0.001 { 1 } else { 0 });
 }
 
 fn selection_text(t: Tab&, pool: slice_pool<buffer::Cell>&) -> u8[>..] {

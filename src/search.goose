@@ -1,6 +1,6 @@
 // Scrollback search. A query is matched case-insensitively per line; the
 // result is one highlighted range, and next/previous wrap through the active
-// tab's history and visible grid. The UI that types the query lives in main.
+// tab's history and visible grid. The bar that types the query is search_ui.
 
 namespace search;
 
@@ -9,19 +9,26 @@ import slice_pool;
 import .buffer;
 import .tab;
 
+const QUERY_MAX: i64 = 128;
+
 struct State {
     active: bool = false,
     found: bool = false,
     line: i64 = 0,
     start: i64 = 0,
     end: i64 = 0,
-    // Goose requires a resizable field to be last.
-    query: u8[>..] = [],
+    // Byte index of the editing caret in `query`.
+    cursor: i64 = 0,
+    // Bounded, not growable: a State sits inside other structs, and the query
+    // is capped anyway.
+    query: u8[..QUERY_MAX] = [],
 }
 
+// Opening keeps the last query: re-running the previous search is the common
+// case after closing the bar.
 fn open(s: State&) {
     s.active = true;
-    s.query.clear();
+    s.cursor = s.query.len;
     s.found = false;
     s.line = 0;
     s.start = 0;
@@ -30,26 +37,84 @@ fn open(s: State&) {
 
 fn close(s: State&) {
     s.active = false;
-    s.query.clear();
     s.found = false;
 }
 
 fn add_text(s: State&, cp: u32) {
-    if s.query.len >= 128 { return; }
     var encoded: u8[>..] = [];
     push_utf8(encoded, cp);
-    for b in encoded {
-        if s.query.len < 128 { s.query.push(b); }
+    insert_bytes(s, encoded);
+}
+
+fn insert_bytes(s: State&, bytes: const u8[:]) {
+    if bytes.len == 0 || s.query.len + bytes.len > QUERY_MAX { return; }
+    let old_len = s.query.len;
+    s.query.resize(old_len + bytes.len, 0);
+    // Shift the tail right from the caret, last byte first.
+    var i = old_len;
+    while i > s.cursor {
+        s.query[i - 1 + bytes.len] = s.query[i - 1];
+        i--;
     }
+    var k = 0;
+    while k < bytes.len {
+        s.query[s.cursor + k] = bytes[k];
+        k++;
+    }
+    s.cursor += bytes.len;
     s.found = false;
 }
 
+fn remove_range(s: State&, a: i64, b: i64) {
+    if a < 0 || b > s.query.len || a >= b { return; }
+    let n = b - a;
+    var i = a;
+    while i + n < s.query.len {
+        s.query[i] = s.query[i + n];
+        i++;
+    }
+    s.query.resize(s.query.len - n);
+}
+
+// Delete the code point before the caret.
 fn backspace(s: State&) {
-    var n = s.query.len;
-    if n == 0 { return; }
-    n -= 1;
+    if s.cursor <= 0 { return; }
+    var n = s.cursor - 1;
     while n > 0 && (s.query[n] & 0xC0) == 0x80 { n -= 1; }
-    s.query.resize(n, 0);
+    remove_range(s, n, s.cursor);
+    s.cursor = n;
+    s.found = false;
+}
+
+// Delete the code point at the caret.
+fn delete_forward(s: State&) {
+    if s.cursor >= s.query.len { return; }
+    var n = s.cursor + 1;
+    while n < s.query.len && (s.query[n] & 0xC0) == 0x80 { n += 1; }
+    remove_range(s, s.cursor, n);
+    s.found = false;
+}
+
+fn left(s: State&) {
+    if s.cursor <= 0 { return; }
+    var n = s.cursor - 1;
+    while n > 0 && (s.query[n] & 0xC0) == 0x80 { n -= 1; }
+    s.cursor = n;
+}
+
+fn right(s: State&) {
+    if s.cursor >= s.query.len { return; }
+    var n = s.cursor + 1;
+    while n < s.query.len && (s.query[n] & 0xC0) == 0x80 { n += 1; }
+    s.cursor = n;
+}
+
+fn home(s: State&) { s.cursor = 0; }
+fn end(s: State&) { s.cursor = s.query.len; }
+
+fn clear(s: State&) {
+    s.query.clear();
+    s.cursor = 0;
     s.found = false;
 }
 
@@ -162,12 +227,7 @@ fn scan(s: State&, t: tab::Tab&, pool: slice_pool<buffer::Cell>&,
 
 fn find_first(s: State&, t: tab::Tab&, pool: slice_pool<buffer::Cell>&) -> bool {
     if s.query.len == 0 { s.found = false; return false; }
-    let start = if t.term.alt_active {
-        t.term.hist_count
-    } else {
-        t.term.hist_count - t.scroll - (if t.scroll_frac > 0.001 { 1 } else { 0 })
-    };
-    return scan(s, t, pool, start, 0, true);
+    return scan(s, t, pool, tab::first_line(t), 0, true);
 }
 
 fn next(s: State&, t: tab::Tab&, pool: slice_pool<buffer::Cell>&) -> bool {
@@ -185,7 +245,6 @@ fn next(s: State&, t: tab::Tab&, pool: slice_pool<buffer::Cell>&) -> bool {
 fn prev(s: State&, t: tab::Tab&, pool: slice_pool<buffer::Cell>&) -> bool {
     if s.query.len == 0 { s.found = false; return false; }
     if !s.found {
-        let lo = if t.term.alt_active { t.term.hist_count } else { 0 };
         let hi = t.term.hist_count + t.term.rows - 1;
         return scan(s, t, pool, hi, t.term.cols - 1, false);
     }

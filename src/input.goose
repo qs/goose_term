@@ -191,14 +191,20 @@ fn focus(out: u8[>..]&, gained: bool) {
 }
 
 // Clipboard text as keystrokes. Newlines become carriage returns, and in
-// bracketed paste mode the text is wrapped as the shell expects.
+// bracketed paste mode the text is wrapped as the shell expects. Everything
+// else a terminal treats as a control — C0, DEL, ESC — is dropped: a paste is
+// text, and a clipboard that could smuggle ESC through it could drive the
+// shell, or fake the end-of-paste marker.
 fn paste(out: u8[>..]&, text: const u8[:], bracketed: bool) {
     if bracketed {
         out.push(ESC); out.push('['); out.push('2'); out.push('0'); out.push('0'); out.push('~');
     }
     for b in text {
-        if b == 10 { out.push(13); }
-        else if b != 13 { out.push(b); }
+        if b == 10 {
+            out.push(13);
+        } else if b == 9 || (b >= 32 && b != 127) {
+            out.push(b);
+        }
     }
     if bracketed {
         out.push(ESC); out.push('['); out.push('2'); out.push('0'); out.push('1'); out.push('~');

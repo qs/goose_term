@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -35,7 +36,11 @@
 // SDL3, declared by hand: this file is compiled on its own, and the gfx
 // package supplies the SDL it needs at link time.
 typedef struct SDL_Window SDL_Window;
+typedef struct SDL_Rect {
+    int x, y, w, h;
+} SDL_Rect;
 extern SDL_Window **SDL_GetWindows(int *count);
+extern bool SDL_SetTextInputArea(SDL_Window *window, const SDL_Rect *rect, int cursor);
 extern bool SDL_SetWindowBordered(SDL_Window *window, bool bordered);
 extern bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen);
 extern bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y);
@@ -59,10 +64,17 @@ struct gt_slice_mut {
 // Spawn `shell` on a fresh PTY with a `rows` x `cols` window. Returns the
 // master fd, or -1 with errno set. The child gets TERM=xterm-256color and a
 // non-blocking master is handed back.
+// The errno of the last failed spawn, for gt_spawn_error.
+static int gt_spawn_errno = 0;
+
 int32_t gt_spawn_pty(struct gt_slice_in shell, int32_t rows, int32_t cols,
                      int32_t *master_fd, int32_t *child_pid) {
+    gt_spawn_errno = 0;
     char path[1024];
-    if (shell.len <= 0 || shell.len >= (int64_t)sizeof(path)) return -1;
+    if (shell.len <= 0 || shell.len >= (int64_t)sizeof(path)) {
+        gt_spawn_errno = EINVAL;
+        return -1;
+    }
     memcpy(path, shell.data, (size_t)shell.len);
     path[shell.len] = 0;
 
@@ -71,10 +83,19 @@ int32_t gt_spawn_pty(struct gt_slice_in shell, int32_t rows, int32_t cols,
     ws.ws_row = (unsigned short)(rows > 0 ? rows : 24);
     ws.ws_col = (unsigned short)(cols > 0 ? cols : 80);
 
+    // A write to a master whose child has just exited must come back as
+    // EPIPE, not kill the whole terminal with SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
+
     int master = -1;
     pid_t pid = forkpty(&master, NULL, NULL, &ws);
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        gt_spawn_errno = errno;
+        return -1;
+    }
     if (pid == 0) {
+        // The shell starts with the default disposition, not ours.
+        signal(SIGPIPE, SIG_DFL);
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         unsetenv("LINES");
@@ -113,10 +134,17 @@ int32_t gt_read_pty(int32_t master_fd, struct gt_slice_mut buf, int32_t max_len)
     return 0;
 }
 
-// Write as much as the PTY will take without blocking; the count written.
+// A single write may wait this long for a program that is behind on its
+// input: long enough for a shell to drain a paste, short enough never to
+// stall the UI. What is still unwritten after the retries is reported back,
+// so the caller can say so instead of dropping it silently.
+#define GT_WRITE_WAIT_MS 10
+#define GT_WRITE_RETRIES 2
+
 int32_t gt_write_pty(int32_t master_fd, struct gt_slice_in buf, int32_t len) {
     int32_t want = (int32_t)(buf.len < len ? buf.len : len);
     int32_t done = 0;
+    int waits = 0;
     while (done < want) {
         ssize_t n = write(master_fd, buf.data + done, (size_t)(want - done));
         if (n > 0) {
@@ -124,6 +152,15 @@ int32_t gt_write_pty(int32_t master_fd, struct gt_slice_in buf, int32_t len) {
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && waits < GT_WRITE_RETRIES) {
+            struct pollfd p;
+            p.fd = master_fd;
+            p.events = POLLOUT;
+            p.revents = 0;
+            if (poll(&p, 1, GT_WRITE_WAIT_MS) <= 0) break;
+            waits++;
+            continue;
+        }
         break;
     }
     return done;
@@ -131,22 +168,21 @@ int32_t gt_write_pty(int32_t master_fd, struct gt_slice_in buf, int32_t len) {
 
 // Hang up the child's whole process group, not just the shell: a foreground
 // job (`sleep 100`, an editor) would otherwise keep the PTY open and leave
-// the close waiting. Closing the master and SIGKILLing the group finish it,
-// and reaping is bounded so a stuck child can never freeze the UI.
+// the close waiting. The escalation gives each signal a short grace period
+// first, so a shell runs its own exit path (saving history, killing jobs)
+// instead of being killed outright; reaping is bounded so a stuck child can
+// never freeze the UI.
 void gt_close_pty(int32_t master_fd, int32_t child_pid) {
-    if (child_pid > 0) {
-        killpg(child_pid, SIGHUP);
-        killpg(child_pid, SIGTERM);
-    }
+    if (child_pid > 0) killpg(child_pid, SIGHUP);
     if (master_fd >= 0) close(master_fd);
-    if (child_pid > 0) {
-        killpg(child_pid, SIGKILL);
-        for (int i = 0; i < 20; i++) {
-            int status = 0;
-            pid_t r = waitpid(child_pid, &status, WNOHANG);
-            if (r == child_pid || (r < 0 && errno == ECHILD)) break;
-            usleep(1000);
-        }
+    if (child_pid <= 0) return;
+    for (int i = 0; i < 100; i++) {
+        int status = 0;
+        pid_t r = waitpid(child_pid, &status, WNOHANG);
+        if (r == child_pid || (r < 0 && errno == ECHILD)) return;
+        if (i == 30) killpg(child_pid, SIGTERM);
+        else if (i == 60) killpg(child_pid, SIGKILL);
+        usleep(1000);
     }
 }
 
@@ -168,6 +204,70 @@ void gt_sleep_ms(int32_t ms) {
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+}
+
+// Block until one of the given PTY masters is readable, or the timeout
+// passes. The frame loop uses this to sleep instead of polling, so a quiet
+// terminal costs no CPU and an echoing one is still answered immediately.
+int32_t gt_wait_pty(struct gt_slice_in fds, int32_t timeout_ms) {
+    const int32_t *in = (const int32_t *)fds.data;
+    int32_t n = (int32_t)(fds.len / (int64_t)sizeof(int32_t));
+    struct pollfd p[64];
+    if (n > 64) n = 64;
+    nfds_t used = 0;
+    for (int32_t i = 0; i < n; i++) {
+        if (in[i] < 0) continue;
+        p[used].fd = in[i];
+        p[used].events = POLLIN;
+        p[used].revents = 0;
+        used++;
+    }
+    if (used == 0) {
+        gt_sleep_ms(timeout_ms);
+        return 0;
+    }
+    int r = poll(p, used, timeout_ms > 0 ? timeout_ms : 0);
+    if (r <= 0) return 0;
+    for (nfds_t i = 0; i < used; i++) {
+        if ((p[i].revents & POLLIN) != 0) return 1;
+    }
+    return 0;
+}
+
+// Where SDL should put the IME's candidate window: beside the text cursor,
+// rather than at whatever spot the platform last remembered.
+int32_t gt_set_ime_area(int32_t x, int32_t y, int32_t w, int32_t h) {
+    int count = 0;
+    SDL_Window **windows = SDL_GetWindows(&count);
+    if (!windows || count <= 0) return 0;
+    SDL_Rect rect;
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+    return SDL_SetTextInputArea(windows[0], &rect, 0) ? 1 : 0;
+}
+
+// The child's exit code if it has already exited, else -1. Used to tell an
+// exec failure (127) apart from a shell that simply exited.
+int32_t gt_child_exit(int32_t child_pid) {
+    if (child_pid <= 0) return -1;
+    int status = 0;
+    pid_t r = waitpid(child_pid, &status, WNOHANG);
+    if (r != child_pid) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+// The message for the last failed spawn, which gt_spawn_pty recorded.
+int32_t gt_spawn_error(struct gt_slice_mut buf) {
+    if (gt_spawn_errno == 0) return 0;
+    const char *msg = strerror(gt_spawn_errno);
+    int32_t len = (int32_t)strlen(msg);
+    int32_t n = len < (int32_t)buf.len ? len : (int32_t)buf.len;
+    if (n > 0 && buf.data) memcpy(buf.data, msg, (size_t)n);
+    gt_spawn_errno = 0;
+    return n;
 }
 
 // Desktop fullscreen for the same window, which v1 of the gfx package does

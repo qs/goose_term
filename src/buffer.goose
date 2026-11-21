@@ -308,12 +308,9 @@ fn grow_history(t: Terminal&, pool: slice_pool<Cell>&) {
     var line = 0;
     while line < t.hist_count {
         let old_slot = (oldest + line) % t.hist_cap;
-        var col = 0;
-        while col < t.cols {
-            pool.items[fresh_off + line * t.cols + col] =
-                pool.items[t.hist_off + old_slot * t.cols + col];
-            col++;
-        }
+        let to = fresh_off + line * t.cols;
+        let from = t.hist_off + old_slot * t.cols;
+        pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
         line++;
     }
 
@@ -326,13 +323,43 @@ fn grow_history(t: Terminal&, pool: slice_pool<Cell>&) {
     t.hist_total = t.hist_count;
 }
 
+// Move the oldest lines out: keep at most `keep` of them, newest last. The
+// lines are renumbered, so a caller holding an absolute line (a selection, a
+// scroll offset) has to let go of it.
+fn trim_history(t: Terminal&, pool: slice_pool<Cell>&, keep: i64) {
+    if keep >= t.hist_count { return; }
+    var want = if keep < 0 { 0 } else { keep };
+    let new_cap = max(want, 64);
+    let new_len = new_cap * t.cols;
+    let fresh = pool.alloc_slice(new_len);
+    let fresh_off = pool.items.range_index(fresh);
+    for i in new_len { pool.items[fresh_off + i] = blank(); }
+
+    let oldest = t.hist_total - t.hist_count;
+    var line = t.hist_count - want;
+    var w = 0;
+    while line < t.hist_count {
+        let slot = (oldest + line) % t.hist_cap;
+        let to = fresh_off + w * t.cols;
+        let from = t.hist_off + slot * t.cols;
+        pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
+        w++;
+        line++;
+    }
+    pool.free_slice(pool.items[t.hist_off..t.hist_off + t.hist_len]);
+    t.hist_off = fresh_off;
+    t.hist_len = new_len;
+    t.hist_cap = new_cap;
+    t.hist_count = w;
+    t.hist_total = w;
+}
+
 fn history_push(t: Terminal&, pool: slice_pool<Cell>&, y: i64) {
     if t.hist_count == t.hist_cap { grow_history(t, pool); }
     let slot = t.hist_total % t.hist_cap;
     let base = t.hist_off + slot * t.cols;
-    for x in t.cols {
-        pool.items[base + x] = pool.items[t.grid_off + y * t.cols + x];
-    }
+    let from = t.grid_off + y * t.cols;
+    pool.items[base..base + t.cols].move_from(pool.items[from..from + t.cols]);
     t.hist_total += 1;
     if t.hist_count < t.hist_cap { t.hist_count += 1; }
 }
@@ -347,10 +374,9 @@ fn scroll_up(t: Terminal&, pool: slice_pool<Cell>&, n: i64) {
         }
         var y = t.scroll_top;
         while y < t.scroll_bot {
-            for x in t.cols {
-                pool.items[t.grid_off + y * t.cols + x] =
-                    pool.items[t.grid_off + (y + 1) * t.cols + x];
-            }
+            let to = t.grid_off + y * t.cols;
+            let from = to + t.cols;
+            pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
             y++;
         }
         clear_row(t, pool, t.scroll_bot);
@@ -362,10 +388,9 @@ fn scroll_down(t: Terminal&, pool: slice_pool<Cell>&, n: i64) {
     for k in count {
         var y = t.scroll_bot;
         while y > t.scroll_top {
-            for x in t.cols {
-                pool.items[t.grid_off + y * t.cols + x] =
-                    pool.items[t.grid_off + (y - 1) * t.cols + x];
-            }
+            let to = t.grid_off + y * t.cols;
+            let from = to - t.cols;
+            pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
             y--;
         }
         clear_row(t, pool, t.scroll_top);
@@ -564,10 +589,9 @@ fn insert_lines(t: Terminal&, pool: slice_pool<Cell>&, n: i64) {
     let count = min(max(n, 1), t.scroll_bot - t.cur_y + 1);
     var y = t.scroll_bot;
     while y >= t.cur_y + count {
-        for x in t.cols {
-            pool.items[t.grid_off + y * t.cols + x] =
-                pool.items[t.grid_off + (y - count) * t.cols + x];
-        }
+        let to = t.grid_off + y * t.cols;
+        let from = t.grid_off + (y - count) * t.cols;
+        pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
         y--;
     }
     var k = 0;
@@ -583,10 +607,9 @@ fn delete_lines(t: Terminal&, pool: slice_pool<Cell>&, n: i64) {
     let count = min(max(n, 1), t.scroll_bot - t.cur_y + 1);
     var y = t.cur_y;
     while y + count <= t.scroll_bot {
-        for x in t.cols {
-            pool.items[t.grid_off + y * t.cols + x] =
-                pool.items[t.grid_off + (y + count) * t.cols + x];
-        }
+        let to = t.grid_off + y * t.cols;
+        let from = t.grid_off + (y + count) * t.cols;
+        pool.items[to..to + t.cols].move_from(pool.items[from..from + t.cols]);
         y++;
     }
     var k = 0;
@@ -687,11 +710,9 @@ fn resize_grid(pool: slice_pool<Cell>&, old_off: i64, old_len: i64,
     let copy_cols = min(old_cols, cols);
     var y = 0;
     while y < copy_rows {
-        var x = 0;
-        while x < copy_cols {
-            pool.items[off + y * cols + x] = pool.items[old_off + y * old_cols + x];
-            x++;
-        }
+        let to = off + y * cols;
+        let from = old_off + y * old_cols;
+        pool.items[to..to + copy_cols].move_from(pool.items[from..from + copy_cols]);
         y++;
     }
     pool.free_slice(pool.items[old_off..old_off + old_len]);
@@ -724,31 +745,33 @@ fn resize(t: Terminal&, pool: slice_pool<Cell>&, cols: i64, rows: i64) {
         t.main_grid_len = main_len;
     }
 
-    let fresh_hist_len = t.hist_cap * new_cols;
-    let fresh_hist = pool.alloc_slice(fresh_hist_len);
-    let fresh_hist_off = pool.items.range_index(fresh_hist);
-    for i in fresh_hist_len { pool.items[fresh_hist_off + i] = blank(); }
+    // The scrollback is laid out by columns: a height-only resize (dragging
+    // the window's bottom edge, say) can keep it as it is.
+    if new_cols != old_cols {
+        let fresh_hist_len = t.hist_cap * new_cols;
+        let fresh_hist = pool.alloc_slice(fresh_hist_len);
+        let fresh_hist_off = pool.items.range_index(fresh_hist);
+        for i in fresh_hist_len { pool.items[fresh_hist_off + i] = blank(); }
 
-    let oldest = t.hist_total - t.hist_count;
-    var line = 0;
-    while line < t.hist_count {
-        let old_slot = (oldest + line) % t.hist_cap;
+        let oldest = t.hist_total - t.hist_count;
         let copy = min(old_cols, new_cols);
-        var col = 0;
-        while col < copy {
-            pool.items[fresh_hist_off + line * new_cols + col] =
-                pool.items[old_hist_off + old_slot * old_cols + col];
-            col++;
+        var line = 0;
+        while line < t.hist_count {
+            let old_slot = (oldest + line) % t.hist_cap;
+            let to = fresh_hist_off + line * new_cols;
+            let from = old_hist_off + old_slot * old_cols;
+            pool.items[to..to + copy].move_from(pool.items[from..from + copy]);
+            line++;
         }
-        line++;
+        pool.free_slice(pool.items[old_hist_off..old_hist_off + old_hist_len]);
+
+        t.hist_off = fresh_hist_off;
+        t.hist_len = fresh_hist_len;
+        t.hist_total = t.hist_count;
     }
-    pool.free_slice(pool.items[old_hist_off..old_hist_off + old_hist_len]);
 
     t.cols = new_cols;
     t.rows = new_rows;
-    t.hist_off = fresh_hist_off;
-    t.hist_len = fresh_hist_len;
-    t.hist_total = t.hist_count;
     t.cur_x = clamp(t.cur_x, 0, t.cols - 1);
     t.cur_y = clamp(t.cur_y, 0, t.rows - 1);
     t.saved_x = clamp(t.saved_x, 0, t.cols - 1);

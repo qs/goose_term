@@ -42,6 +42,24 @@ jobs:
       - name: Check out the tagged source
         uses: actions/checkout@v4
 
+      # Goose's own compiler cache holds the CMake build of SDL, Nuklear and
+      # the gfx/ui native parts. Rebuilding those from scratch per tag was
+      # most of a release's wall time.
+      - name: Cache Goose's build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.goose
+          key: goose-cache-${{ runner.os }}-${{ env.GOOSE_VERSION }}
+          restore-keys: |
+            goose-cache-${{ runner.os }}-
+
+      - name: Cache the Goose toolchain
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: goose-toolchain-${{ runner.os }}-${{ env.GOOSE_VERSION }}
+
       - name: Install the C compiler and X11/Wayland headers
         if: runner.os == 'Linux'
         shell: bash
@@ -59,11 +77,12 @@ jobs:
           command -v cmake > /dev/null || brew install cmake
 
       - name: Install the pinned Goose compiler
+        if: steps.toolchain.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           archive="${{ matrix.goose_archive }}"
-          mkdir toolchain
+          mkdir -p toolchain
           cd toolchain
           curl --fail --location --show-error --remote-name \
             "https://github.com/aardappel/goose/releases/download/${GOOSE_VERSION}/${archive}"
@@ -75,9 +94,15 @@ jobs:
             shasum -a 256 --check "${archive}.sha256"
           fi
           tar --extract --gzip --file "${archive}"
-          goose="$(find "$PWD" -type f -name goose -perm -111 -print -quit)"
+
+      # Runs whether the toolchain was downloaded or restored from the cache.
+      - name: Find the Goose compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          goose="$(find toolchain -type f -name goose -perm -111 -print -quit)"
           test -n "$goose"
-          echo "GOOSE=$goose" >> "${GITHUB_ENV}"
+          echo "GOOSE=$PWD/$goose" >> "${GITHUB_ENV}"
 
       - name: Check and build the terminal
         shell: bash

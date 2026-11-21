@@ -24,6 +24,10 @@ extern fn gt_begin_window_drag() -> i32;
 extern fn gt_update_window_drag();
 extern fn gt_end_window_drag();
 extern fn gt_sleep_ms(ms: i32);
+extern fn gt_wait_pty(fds: const i32[:], timeout_ms: i32) -> i32;
+extern fn gt_spawn_error(out: u8[:]) -> i32;
+extern fn gt_child_exit(child_pid: i32) -> i32;
+extern fn gt_set_ime_area(x: i32, y: i32, w: i32, h: i32) -> i32;
 extern fn gt_get_primary(buf: u8[:]) -> i32;
 extern fn gt_set_primary(text: const u8[:]) -> i32;
 extern fn gt_open_url(url: const u8[:]) -> i32;
@@ -45,6 +49,12 @@ fn read(p: Pty&, buf: u8[:]) -> i64 {
 fn write_bytes(p: Pty&, data: const u8[:]) -> i64 {
     if !p.alive || p.fd < 0 || data.len == 0 { return 0; }
     return gt_write_pty(p.fd, data, data.len as i32);
+}
+
+// The exit code if the child has already been reaped, else -1.
+fn exit_code(p: Pty&) -> i64 {
+    if p.pid <= 0 { return -1; }
+    return gt_child_exit(p.pid);
 }
 
 fn resize(p: Pty&, rows: i64, cols: i64) {
@@ -89,6 +99,31 @@ fn drag_end() {
 // Idle pacing: lets the frame loop rest without a busy spin.
 fn sleep_ms(ms: i64) {
     if ms > 0 { gt_sleep_ms(ms as i32); }
+}
+
+// Block until one of these PTY masters has bytes to read, or the timeout
+// passes. Wake-ups on output only: a quiet terminal stays asleep instead of
+// polling four times a millisecond.
+fn wait(fds: const i32[:], timeout_ms: i64) {
+    gt_wait_pty(fds, timeout_ms as i32);
+}
+
+// Why the last spawn failed, as the C library words it. False when there is
+// nothing to report.
+fn spawn_error(out: u8[>..]&) -> bool {
+    out.resize(256, 0);
+    let n = gt_spawn_error(out);
+    if n <= 0 {
+        out.clear();
+        return false;
+    }
+    out.resize(n, 0);
+    return true;
+}
+
+// Point the IME's candidate window at the text cursor.
+fn set_ime_area(x: f32, y: f32, w: f32, h: f32) {
+    gt_set_ime_area(x as i32, y as i32, w as i32, h as i32);
 }
 
 // The X11/Wayland PRIMARY selection, which middle-click paste uses. SDL

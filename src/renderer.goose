@@ -72,12 +72,12 @@ struct Renderer {
 }
 
 struct Drawn {
-    cp: u32,
-    cp2: u32,
-    fg: u32,
-    bg: u32,
-    underline: bool,
-    bold: bool,
+    cp: u32 = 32,
+    cp2: u32 = 0,
+    fg: u32 = 0xE6E6E6FF,
+    bg: u32 = 0x14141CFF,
+    underline: bool = false,
+    bold: bool = false,
 }
 
 // Everything one frame needs to know besides the terminal state. Passing
@@ -90,6 +90,7 @@ struct View {
     search_active: bool = false,
     search_query: u8[128] = [0; 128],
     search_query_len: i64 = 0,
+    search_cursor: i64 = 0,
     search_found: bool = false,
     hit_line: i64 = 0,
     hit_start: i64 = 0,
@@ -187,6 +188,13 @@ fn cell_size(r: Renderer&) -> float2 {
     float2 { r.cell_w, r.cell_h }
 }
 
+// Where the grid starts: past the sidebar when it is showing.
+fn grid_origin(r: Renderer&, show_sidebar: bool) -> float2 {
+    var x = PAD;
+    if show_sidebar { x += sidebar_width(r, gfx::screen_size().x); }
+    return float2 { x, PAD };
+}
+
 fn tab_row_height(r: Renderer&) -> f32 {
     r.cell_h + TAB_ROW_GAP
 }
@@ -246,7 +254,8 @@ fn append_clipped(out: u8[>..]&, s: const u8[:], max_chars: i64) {
     push_utf8(out, 0x2026);
 }
 
-fn drawn_cell(t: tab::Tab&, pool: slice_pool<buffer::Cell>&, abs: i64, x: i64) -> Drawn {
+fn drawn_cell(t: tab::Tab&, pool: slice_pool<buffer::Cell>&, abs: i64, x: i64,
+              sel_active: bool, l0: i64, c0: i64, l1: i64, c1: i64) -> Drawn {
     let c = buffer::cell_at_abs(t.term, pool, abs, x);
     var fg = c.fg;
     var bg = c.bg;
@@ -255,7 +264,7 @@ fn drawn_cell(t: tab::Tab&, pool: slice_pool<buffer::Cell>&, abs: i64, x: i64) -
         fg = bg;
         bg = tmp;
     }
-    if tab::is_selected(t, abs, x) {
+    if tab::cell_in_range(sel_active, l0, c0, l1, c1, abs, x) {
         let tmp = fg;
         fg = bg;
         bg = tmp;
@@ -275,6 +284,9 @@ fn hit_cell(d: Drawn, view: View, abs: i64, x: i64) -> Drawn {
     return d;
 }
 
+// One row of resolved cells, reused between rows and frames.
+var row_buf: Drawn[>..] = [];
+
 fn draw_grid(r: Renderer&, pool: slice_pool<buffer::Cell>&, t: tab::Tab&, ox: f32, oy: f32,
              view: View) {
     let cw = r.cell_w;
@@ -291,19 +303,32 @@ fn draw_grid(r: Renderer&, pool: slice_pool<buffer::Cell>&, t: tab::Tab&, ox: f3
     };
     let draw_rows = t.term.rows + (if partial { 1 } else { 0 });
     let y0 = oy - frac;
+    // Resolve the selection once: it is one range for every cell on screen.
+    let sel = t.sel_active;
+    let l0, c0, l1, c1 = tab::order(t);
     var text: u8[>..] = [];
     var y = 0;
     while y < draw_rows {
         let abs = first + y;
         let py = y0 + y * ch;
+        // Resolve the row once, search highlight included: the run loop below
+        // has to read every cell again to find where the attributes change,
+        // so computing each cell twice was the hot spot of a frame.
+        if row_buf.len < t.term.cols { row_buf.resize(t.term.cols, Drawn { .. }); }
         var x = 0;
         while x < t.term.cols {
-            let d0 = hit_cell(drawn_cell(t, pool, abs, x), view, abs, x);
+            row_buf[x] = hit_cell(drawn_cell(t, pool, abs, x, sel, l0, c0, l1, c1),
+                                  view, abs, x);
+            x++;
+        }
+        x = 0;
+        while x < t.term.cols {
+            let d0 = row_buf[x];
             text.clear();
             var text_end = 0;
             var j = x;
             while j < t.term.cols {
-                let d = hit_cell(drawn_cell(t, pool, abs, j), view, abs, j);
+                let d = row_buf[j];
                 if d.fg != d0.fg || d.bg != d0.bg || d.underline != d0.underline ||
                    d.bold != d0.bold { break; }
                 // A zero is the second half of a wide glyph, which the
@@ -433,6 +458,14 @@ fn draw_search(r: Renderer&, view: View, w: f32, h: f32) {
     append_clipped(clipped, label, max_chars);
     ui::draw_text(r.ctx, ui::rect(PAD, y + 4.0, w - PAD * 2.0, r.cell_h), clipped,
                   r.font, color(0), color(THEME_FG));
+
+    // The caret, so the query can be edited in the middle of a word.
+    var before: u8[>..] = [];
+    before.append("Search: ");
+    before.append(view.search_query[..clamp(view.search_cursor, 0, view.search_query_len)]);
+    var cx = PAD + ui::text_width(r.font, before);
+    if cx > w - PAD { cx = w - PAD; }
+    ui::fill_rect(r.ctx, ui::rect(cx, y + 4.0, 1.0, r.cell_h), 0.0, color(THEME_CURSOR));
 }
 
 fn draw_cursor(r: Renderer&, t: tab::Tab&, ox: f32, oy: f32, cursor_on: bool) {

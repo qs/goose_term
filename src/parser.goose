@@ -6,8 +6,10 @@
 namespace parser;
 
 import std;
+import gfx;
 import slice_pool;
 import .buffer;
+import .pty;
 
 enum State {
     Ground,
@@ -36,9 +38,11 @@ struct Parser {
     osc_esc: bool = false,
     title: u8[..128] = [],
     title_changed: bool = false,
-    clipboard: u8[16384] = [0; 16384],
+    // The decoded OSC 52 payload is written into the front of `osc` in place
+    // (it is always shorter than the base64 that produced it) and handed to
+    // the clipboard as soon as the sequence completes, before the next OSC
+    // can reuse the buffer.
     clipboard_len: i64 = 0,
-    clipboard_pending: bool = false,
     clipboard_primary: bool = false,
     utf8: u8[4] = [0; 4],
     utf8_len: i64 = 0,
@@ -494,8 +498,13 @@ fn osc_finish(p: Parser&, t: buffer::Terminal&) {
         while sep < p.osc_len && p.osc[sep] != ';' { sep++; }
         if sep >= p.osc_len { return; }
         p.clipboard_primary = sep > 3 && p.osc[3] == 'p';
-        if decode_osc52(p, sep + 1) {
-            p.clipboard_pending = true;
+        if decode_osc52(p, sep + 1) && p.clipboard_len > 0 {
+            let payload = p.osc[..p.clipboard_len];
+            if p.clipboard_primary {
+                pty::set_primary(payload);
+            } else {
+                gfx::set_clipboard(payload);
+            }
         }
     }
 }
@@ -508,6 +517,8 @@ fn b64_value(b: u8) -> i64 {
     if b == '/' { return 63; }
     return -1;
 }
+
+const CLIPBOARD_MAX: i64 = 16384;
 
 fn decode_osc52(p: Parser&, start: i64) -> bool {
     p.clipboard_len = 0;
@@ -528,11 +539,14 @@ fn decode_osc52(p: Parser&, start: i64) -> bool {
         bits += 6;
         if bits >= 8 {
             bits -= 8;
-            let out = ((acc >> bits) & 255) as u8;
-            if p.clipboard_len < 16383 {
-                p.clipboard[p.clipboard_len] = out;
-                p.clipboard_len += 1;
+            if p.clipboard_len >= CLIPBOARD_MAX {
+                p.clipboard_len = 0;
+                return false;
             }
+            // Decoding in place: the write index stays behind the read index,
+            // since four base64 bytes carry three decoded ones.
+            p.osc[p.clipboard_len] = ((acc >> bits) & 255) as u8;
+            p.clipboard_len += 1;
         }
     }
     return true;
