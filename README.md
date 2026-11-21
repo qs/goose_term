@@ -43,6 +43,13 @@ The GitHub Actions workflow downloads the pinned Goose compiler release and
 verifies its checksum before compiling the application. A published archive
 contains the executable; the fonts are embedded at build time.
 
+To check a download, save the archive and its `.sha256` in one directory and
+run:
+
+```bash
+sha256sum --check goose-term-linux-x86_64.tar.gz.sha256
+```
+
 ## Run
 
 ```bash
@@ -110,3 +117,9 @@ assets/            JuliaMono primary + JetBrains Mono fallback and licenses
 - CJK and emoji outside the baked ranges still fall back to `?`; adding a wide-glyph face is the next font step.
 - Momentum is disabled in the alternate screen, where full-screen apps own scrolling.
 - Terminal graphics protocols (Sixel, Kitty images) and OSC 133 shell integration are not implemented.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled fonts keep their own terms: JuliaMono
+and JetBrains Mono are under the SIL Open Font License 1.1, in
+`assets/OFL-JuliaMono.txt` and `assets/OFL.txt`.
