@@ -62,7 +62,13 @@ jobs:
           mkdir dist
           install --mode=755 build/goose-term dist/goose-term
           tar --directory=dist --create --gzip --file=dist/goose-term-linux-x86_64.tar.gz goose-term
-          sha256sum dist/goose-term-linux-x86_64.tar.gz > dist/goose-term-linux-x86_64.tar.gz.sha256
+          # `dist/*` below is what the release uploads, so drop the staged
+          # executable: the archive and its checksum are the assets.
+          rm dist/goose-term
+          # The checksum names the bare file, not the dist/ path, so a
+          # downloader can run `sha256sum --check` beside the two files.
+          (cd dist && sha256sum goose-term-linux-x86_64.tar.gz \
+            > goose-term-linux-x86_64.tar.gz.sha256)
 
       - name: Create or update the GitHub Release
         shell: bash
