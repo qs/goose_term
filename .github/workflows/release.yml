@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  GOOSE_VERSION: v2026.4
+  # sha256 of goose-v2026.4-linux-x64.tar.gz. Goose's releases carry no
+  # checksum file, so the archive hash is pinned here; update both together.
+  GOOSE_LINUX_X64_SHA256: 559ad7572df89fcd1273512d8679528bcdf876c252ec1f31608d3808b24125b3
+
+jobs:
+  release:
+    name: Build and publish Linux x86_64 release
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+
+      - name: Install the C compiler Goose builds with
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential
+
+      - name: Install the pinned Goose compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="goose-${GOOSE_VERSION}-linux-x64.tar.gz"
+          mkdir toolchain
+          cd toolchain
+          curl --fail --location --show-error --remote-name \
+            "https://github.com/aardappel/goose/releases/download/${GOOSE_VERSION}/${archive}"
+          echo "${GOOSE_LINUX_X64_SHA256}  ${archive}" | sha256sum --check
+          tar --extract --gzip --file "${archive}"
+          goose="$(find "$PWD" -type f -name goose -perm -111 -print -quit)"
+          test -n "$goose"
+          echo "GOOSE=$goose" >> "$GITHUB_ENV"
+
+      - name: Check and build the terminal
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GOOSE" version
+          "$GOOSE" check src/main.goose
+          GOOSE="$GOOSE" ./build.sh
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          install --mode=755 build/goose-term dist/goose-term
+          tar --directory=dist --create --gzip --file=dist/goose-term-linux-x86_64.tar.gz goose-term
+          sha256sum dist/goose-term-linux-x86_64.tar.gz > dist/goose-term-linux-x86_64.tar.gz.sha256
+
+      - name: Create or update the GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes
+          fi

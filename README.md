@@ -6,7 +6,20 @@ It targets Linux with X11 or Wayland through SDL3.
 
 ## Build
 
-The build needs the Goose AOT compiler (the JIT runner is not enough because the terminal links C).
+The build produces an optimized release executable by default. It needs the
+[Goose AOT compiler](https://github.com/aardappel/goose/releases) (the JIT
+runner is not enough because the terminal links C), plus a C compiler and the
+Linux development packages required to link an X11/Wayland application.
+
+On Debian or Ubuntu, start with:
+
+```bash
+sudo apt install build-essential libc6-dev libx11-dev libxext-dev libxi-dev libxcb1-dev
+```
+
+Download and unpack the Linux x64 Goose release, then add its directory to
+`PATH`. Goose keeps its compiler cache outside this repository, under
+`~/.goose` by default.
 
 ```bash
 ./build.sh                 # -> build/goose-term
@@ -14,6 +27,21 @@ GOOSE=/path/to/goose ./build.sh
 ```
 
 `build.sh` uses `goose` from `PATH`, or `./goose-bin` if present.
+
+## Releases
+
+Pushing an annotated `v*` tag builds and publishes a GitHub Release with a
+`goose-term-linux-x86_64.tar.gz` archive and its SHA-256 checksum. The release
+is built on Ubuntu 22.04 and currently targets 64-bit Linux only.
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The GitHub Actions workflow downloads the pinned Goose compiler release and
+verifies its checksum before compiling the application. A published archive
+contains the executable; the fonts are embedded at build time.
 
 ## Run
 
