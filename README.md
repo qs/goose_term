@@ -62,7 +62,7 @@ It starts your `$SHELL` (falling back to `/bin/sh`) in a new tab. Start more tab
 
 - **Tabs** in a wider vertical sidebar that auto-hides when only one is open.
 - **Scrollback** of 10,000 lines per tab, with viewport anchoring while output arrives.
-- **Smooth scrolling**: high-resolution touchpad/wheel deltas move the viewport in sub-line pixels instead of jumping by whole lines. After the input pauses, the viewport coasts with a short frame-rate-independent momentum decay. The wheel direction is inverted for natural touchpad use.
+- **Smooth scrolling**: high-resolution touchpad/wheel deltas move the viewport in sub-line pixels instead of jumping by whole lines. After the input pauses, the viewport coasts with a short frame-rate-independent momentum decay. The deltas are used with the sign the platform reports, so a desktop with natural scrolling behaves as the desktop configured it.
 - **Selection**: drag, kitty-style double-click word selection, triple-click for a line, and copy with `Ctrl+Shift+C` / `Ctrl+Insert`.
 - **Clipboard**: `Ctrl+Shift+V` / `Shift+Insert` paste with bracketed-paste support. Middle-click pastes the X11/Wayland PRIMARY selection.
 - **Alternate screen**: `CSI ? 1049 h/l` (also 47 and 1047). Full-screen programs such as vim, less and Claude get their own grid and restore the normal screen on exit.
@@ -85,6 +85,7 @@ It starts your `$SHELL` (falling back to `/bin/sh`) in a new tab. Start more tab
 | `Ctrl+Shift+1..9` | Jump to tab |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
 | `Ctrl+Shift+V` / `Shift+Insert` | Paste clipboard |
+| `PageUp` / `PageDown` | Scroll one page (forwarded to full-screen programs) |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll one page |
 | `Ctrl+Shift+Up` / `Down` | Scroll one line |
 | `Ctrl+Shift+Home` / `End` | Scroll to top / bottom |

@@ -23,7 +23,6 @@ const MAX_TABS: i64 = 16;
 const AUTO_HIDE_SIDEBAR: bool = true;
 const READ_BUDGET: i64 = 65536;
 const WHEEL_LINES: f32 = 3.0;
-const INVERT_WHEEL: bool = true;
 const DEFAULT_FONT_PX: f32 = 20.0;
 const PRIMARY_CAP: i64 = 65536;
 
@@ -384,9 +383,10 @@ fn scroll_by(lines: i64) {
 fn scroll_wheel(wheel: f32) {
     if wheel == 0.0 || tabs.len == 0 || tabs[active].term.alt_active { return; }
     let ch = renderer::cell_size(rend).y;
-    var dy = wheel * WHEEL_LINES * ch;
-    // Match the user's inverted touchpad direction convention.
-    if INVERT_WHEEL { dy = -dy; }
+    // SDL's sign as it arrives: positive is up, toward the scrollback. A
+    // desktop with natural scrolling already flips touchpad deltas before
+    // they get here, so flipping again here scrolled the wrong way.
+    let dy = wheel * WHEEL_LINES * ch;
 
     // Seed the coast from the rate of the wheel stream. The first event after
     // a long pause only scrolls normally; subsequent events build the velocity
@@ -601,9 +601,24 @@ fn handle_key(e: gfx::Event) -> bool {
             return true;
         }
     }
-    if shift && !ctrl && name == "PageUp" { scroll_page(1); return true; }
-    if shift && !ctrl && name == "PageDown" { scroll_page(-1); return true; }
+    // PageUp/PageDown page the scrollback, with or without Shift. Full-screen
+    // programs own the alternate screen and page with CSI 5~ / CSI 6~
+    // themselves, so there the keys fall through to the encoder instead.
+    if !ctrl && name == "PageUp" {
+        if alt_screen_active() { return false; }
+        scroll_page(1);
+        return true;
+    }
+    if !ctrl && name == "PageDown" {
+        if alt_screen_active() { return false; }
+        scroll_page(-1);
+        return true;
+    }
     return false;
+}
+
+fn alt_screen_active() -> bool {
+    return tabs.len > 0 && tabs[active].term.alt_active;
 }
 
 fn modifiers_down() -> bool {
