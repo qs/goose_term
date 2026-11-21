@@ -2,7 +2,7 @@
 
 A small, fast GPU terminal emulator written in [Goose](https://github.com/aardappel/goose). It uses the standard `gfx` and `ui` packages for the window, font atlas and drawing, and a thin C layer for the PTY and the few SDL hooks `gfx` does not expose.
 
-It targets Linux with X11 or Wayland through SDL3.
+It targets Linux (X11 or Wayland) and macOS (arm64 and x86_64), through SDL3.
 
 ## Build
 
@@ -17,9 +17,17 @@ On Debian or Ubuntu, start with:
 sudo apt install build-essential libc6-dev libx11-dev libxext-dev libxi-dev libxcb1-dev
 ```
 
-Download and unpack the Linux x64 Goose release, then add its directory to
-`PATH`. Goose keeps its compiler cache outside this repository, under
-`~/.goose` by default.
+On macOS the Xcode command line tools supply clang, and CMake comes from
+Homebrew:
+
+```bash
+xcode-select --install
+brew install cmake
+```
+
+Download and unpack the Goose release for your platform (Linux x64,
+macOS arm64 or macOS x64), then add its directory to `PATH`. Goose keeps its
+compiler cache outside this repository, under `~/.goose` by default.
 
 ```bash
 ./build.sh                 # -> build/goose-term
@@ -30,18 +38,24 @@ GOOSE=/path/to/goose ./build.sh
 
 ## Releases
 
-Pushing an annotated `v*` tag builds and publishes a GitHub Release with a
-`goose-term-linux-x86_64.tar.gz` archive and its SHA-256 checksum. The release
-is built on Ubuntu 22.04 and currently targets 64-bit Linux only.
+Pushing an annotated `v*` tag builds and publishes a GitHub Release with one
+archive and SHA-256 checksum per platform:
+
+| Archive | Built on |
+| :--- | :--- |
+| `goose-term-linux-x86_64.tar.gz` | Ubuntu 22.04 |
+| `goose-term-macos-arm64.tar.gz` | macOS 15, Apple silicon |
+| `goose-term-macos-x86_64.tar.gz` | macOS 15, Intel |
 
 ```bash
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-The GitHub Actions workflow downloads the pinned Goose compiler release and
-verifies its checksum before compiling the application. A published archive
-contains the executable; the fonts are embedded at build time.
+The GitHub Actions workflow downloads the pinned Goose compiler release for
+each platform and verifies its checksum before compiling the application. A
+published archive contains the executable; the fonts are embedded at build
+time.
 
 To check a download, save the archive and its `.sha256` in one directory and
 run:
@@ -50,13 +64,23 @@ run:
 sha256sum --check goose-term-linux-x86_64.tar.gz.sha256
 ```
 
+macOS has `shasum` rather than `sha256sum`:
+
+```bash
+shasum -a 256 --check goose-term-macos-arm64.tar.gz.sha256
+```
+
 ## Run
 
 ```bash
 ./build/goose-term
 ```
 
-It starts your `$SHELL` (falling back to `/bin/sh`) in a new tab. Start more tabs with `Ctrl+Shift+T`; closing the last tab exits.
+It starts your `$SHELL` (falling back to `/bin/sh`) in a new tab. Start more tabs with `Ctrl+Shift+T`; closing the last tab exits. On macOS the same shortcuts live on Command: `Cmd+T`, `Cmd+W`, `Cmd+C`, `Cmd+V`, `Cmd+F`, `Cmd+Enter`, `Cmd+Plus` / `Cmd+Minus`, `Cmd+1..9`, and `Cmd+Shift+[` / `]`; `Cmd+Q` quits.
+
+The window is borderless. Drag the empty part of the tab sidebar, or hold
+`Cmd` (macOS) and drag anywhere, to move it; `F11` or `Cmd+Enter` goes
+full-screen.
 
 ## Features
 
@@ -92,6 +116,9 @@ It starts your `$SHELL` (falling back to `/bin/sh`) in a new tab. Start more tab
 | `F11` or `Ctrl+Shift+Enter` | Toggle full-screen |
 | `Ctrl+Shift+Plus` / `Minus` | Font larger / smaller |
 | `Ctrl+Shift+F` | Search scrollback |
+
+On macOS, `Cmd` takes the place of `Ctrl+Shift` for the application shortcuts
+in this table; the terminal's own `Ctrl` combinations still reach the shell.
 | `Enter` / `Shift+Enter` in search | Next / previous hit |
 | `Escape` in search | Close search |
 
@@ -116,6 +143,8 @@ assets/            JuliaMono primary + JetBrains Mono fallback and licenses
 - OSC 52 reads are disabled by design; programs can only set the clipboard.
 - Links are restricted to `http`, `https` and `mailto` before being handed to the desktop.
 - CJK and emoji outside the baked ranges still fall back to `?`; adding a wide-glyph face is the next font step.
+- Middle-click paste reads the X11/Wayland PRIMARY selection, which macOS does not have; there the calls are no-ops and `Cmd+V` is the paste path.
+- The release binaries are not code-signed or notarized. A downloaded macOS build needs a right-click → Open, or `xattr -d com.apple.quarantine goose-term`, the first time.
 - Momentum is disabled in the alternate screen, where full-screen apps own scrolling.
 - Terminal graphics protocols (Sixel, Kitty images) and OSC 133 shell integration are not implemented.
 

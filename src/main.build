@@ -1,5 +1,7 @@
 // The program's own C: the PTY layer and the SDL borderless hook.
 // `goose build` compiles and links it with the rest.
 c_sources = ["pty_helper.c"];
+// forkpty lives in libutil on Linux and in libSystem on macOS, so only the
+// Linux list is needed.
 c_libs_linux = ["util"];
 output = "goose-term";

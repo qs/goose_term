@@ -5,8 +5,8 @@
 #   GOOSE=/path/to/goose ./build.sh
 #
 # The build compiles src/pty_helper.c alongside the generated C and links
-# libutil for forkpty, plus the gfx/ui native parts (SDL3, Nuklear) that the
-# goose_gfx package supplies.
+# libutil for forkpty (Linux only; macOS has it in libSystem), plus the gfx/ui
+# native parts (SDL3, Nuklear) that the goose_gfx package supplies.
 set -euo pipefail
 cd "$(dirname "$0")"
 

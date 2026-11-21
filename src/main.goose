@@ -57,6 +57,7 @@ var last_tick: f64 = 0.0;
 var search_state = search::State { .. };
 var mouse_last_col: i64 = -1;
 var mouse_last_row: i64 = -1;
+var dragging = false;
 
 // --- layout ----------------------------------------------------------------
 
@@ -530,7 +531,8 @@ fn handle_search_event(e: gfx::Event) {
     let name = gfx::key_name(e.scancode);
     let ctrl = (e.mods & gfx::MOD_CTRL) != 0;
     let shift = (e.mods & gfx::MOD_SHIFT) != 0;
-    if ctrl && shift && name == "F" {
+    let cmd = (e.mods & gfx::MOD_GUI) != 0;
+    if ((ctrl && shift) || cmd) && name == "F" {
         search_close();
         return;
     }
@@ -554,7 +556,15 @@ fn handle_key(e: gfx::Event) -> bool {
     let name = gfx::key_name(e.scancode);
     let ctrl = (e.mods & gfx::MOD_CTRL) != 0;
     let shift = (e.mods & gfx::MOD_SHIFT) != 0;
+    let cmd = (e.mods & gfx::MOD_GUI) != 0;
     let repeat = e.repeat;
+
+    // macOS keeps the full-screen toggle on Ctrl+Cmd+F; check it before the
+    // Cmd block, which would otherwise read the F as search.
+    if ctrl && cmd && name == "F" {
+        if !repeat { toggle_fullscreen(); }
+        return true;
+    }
 
     // One-shot shortcuts are consumed on key repeat too, so holding them
     // cannot spawn or close a string of tabs; scrolling and zooming repeat.
@@ -601,6 +611,34 @@ fn handle_key(e: gfx::Event) -> bool {
             return true;
         }
     }
+
+    // macOS puts the application shortcuts on Command, as Terminal.app does.
+    // Cmd+Q, Cmd+H and Cmd+M belong to SDL's own menu bar; every other Cmd
+    // chord is consumed here, because a terminal never sends one to the shell
+    // and an unhandled Cmd+arrow would otherwise escape as a plain arrow.
+    if cmd {
+        if name == "T" { if !repeat { spawn_tab(); } }
+        else if name == "W" { if !repeat { close_active(); } }
+        else if name == "C" { if !repeat { copy_selection(); } }
+        else if name == "V" { if !repeat { paste_clipboard(); } }
+        else if name == "F" { if !repeat { search_open(); } }
+        else if name == "Enter" { if !repeat { toggle_fullscreen(); } }
+        else if name == "PageUp" { prev_tab(); }
+        else if name == "PageDown" { next_tab(); }
+        else if name == "[" { prev_tab(); }
+        else if name == "]" { next_tab(); }
+        else if name == "Equals" || name == "Plus" || e.keycode == 43 || e.keycode == 61 {
+            change_font(1.0);
+        }
+        else if name == "Minus" || e.keycode == 45 || e.keycode == 95 {
+            change_font(-1.0);
+        }
+        else if name.len == 1 && name[0] >= '1' && name[0] <= '9' {
+            if !repeat { jump_tab(name[0] - '1'); }
+        }
+        return true;
+    }
+
     // PageUp/PageDown page the scrollback, with or without Shift. Full-screen
     // programs own the alternate screen and page with CSI 5~ / CSI 6~
     // themselves, so there the keys fall through to the encoder instead.
@@ -792,13 +830,44 @@ fn select_at(inside: bool, col: i64, row: i64, abs: i64) {
     }
 }
 
+// The sidebar's empty area is the closest thing the borderless window has to
+// a title bar, so it moves the window with no modifier. Cmd+drag moves it
+// from anywhere, which is the only handle left once the sidebar auto-hides
+// with a single tab.
+fn sidebar_grip(mp: float2, sz: int2) -> bool {
+    if !show_sidebar() { return false; }
+    if mp.x >= renderer::sidebar_width(rend, sz.x) { return false; }
+    let idx = renderer::tab_index_at(rend, mp.y);
+    return idx < 0 || idx >= tabs.len;
+}
+
+fn handle_window_drag(mp: float2, sz: int2, mods: i32) -> bool {
+    if dragging {
+        if gfx::mouse_down(gfx::MOUSE_LEFT) {
+            pty::drag_update();
+        } else {
+            pty::drag_end();
+            dragging = false;
+        }
+        return true;
+    }
+    let cmd = (mods & gfx::MOD_GUI) != 0;
+    if gfx::mouse_pressed(gfx::MOUSE_LEFT) && (cmd || sidebar_grip(mp, sz)) {
+        dragging = pty::drag_begin();
+        return dragging;
+    }
+    return false;
+}
+
 fn apply_mouse() {
     if tabs.len == 0 { return; }
     let cs = renderer::cell_size(rend);
     let origin = content_origin();
     let sz = gfx::screen_size();
     let mp = gfx::mouse_pos();
+    let mods = held_mods();
 
+    if handle_window_drag(mp, sz, mods) { return; }
     if sidebar_click(mp, sz) { return; }
 
     let inside = mp.x >= origin.x && mp.y >= origin.y &&
@@ -817,7 +886,6 @@ fn apply_mouse() {
     var abs = first + (((mp.y - origin.y + frac) / cs.y) as i64);
     if abs < 0 { abs = 0; }
 
-    let mods = held_mods();
     // Ctrl+click on an OSC 8 link is the terminal-level open gesture; it
     // works even while an app is tracking the mouse.
     if inside && (mods & gfx::MOD_CTRL) != 0 && click_count == 1 &&

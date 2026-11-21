@@ -5,12 +5,14 @@
 // Goose slices cross the boundary as { data, len } structs, and `T&`
 // parameters as pointers, so the signatures below match what
 // src/pty.goose declares.
+//
+// Linux and macOS share the whole file: both have the POSIX pieces, and only
+// the header that declares forkpty differs.
 
 #define _GNU_SOURCE
 
 #include <errno.h>
 #include <fcntl.h>
-#include <pty.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,12 +24,23 @@
 #include <time.h>
 #include <unistd.h>
 
+// forkpty: glibc declares it in <pty.h> (hence _GNU_SOURCE above), macOS in
+// <util.h>, and links it from libSystem.
+#if defined(__APPLE__)
+#include <util.h>
+#else
+#include <pty.h>
+#endif
+
 // SDL3, declared by hand: this file is compiled on its own, and the gfx
 // package supplies the SDL it needs at link time.
 typedef struct SDL_Window SDL_Window;
 extern SDL_Window **SDL_GetWindows(int *count);
 extern bool SDL_SetWindowBordered(SDL_Window *window, bool bordered);
 extern bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen);
+extern bool SDL_GetWindowPosition(SDL_Window *window, int *x, int *y);
+extern bool SDL_SetWindowPosition(SDL_Window *window, int x, int y);
+extern uint32_t SDL_GetGlobalMouseState(float *x, float *y);
 extern char *SDL_GetPrimarySelectionText(void);
 extern bool SDL_SetPrimarySelectionText(const char *text);
 extern bool SDL_OpenURL(const char *url);
@@ -195,4 +208,48 @@ int32_t gt_open_url(struct gt_slice_in url) {
     memcpy(copy, url.data, (size_t)url.len);
     copy[url.len] = 0;
     return SDL_OpenURL(copy) ? 1 : 0;
+}
+
+// Borderless windows have no title bar, so nothing in the platform moves them
+// and the drag is ours to do. The pointer's position inside the window cannot
+// measure it: the window moves under a stationary pointer. The global mouse
+// position can, so the press records the window's position and that global
+// point once, and every update applies the delta from it. Re-applying from
+// the same anchor keeps the window exactly under the pointer rather than
+// accumulating rounding error frame by frame.
+static int gt_drag_win_x = 0;
+static int gt_drag_win_y = 0;
+static float gt_drag_mouse_x = 0.0f;
+static float gt_drag_mouse_y = 0.0f;
+static int gt_dragging = 0;
+
+int32_t gt_begin_window_drag(void) {
+    int count = 0;
+    SDL_Window **windows = SDL_GetWindows(&count);
+    if (!windows || count <= 0) return 0;
+    if (!SDL_GetWindowPosition(windows[0], &gt_drag_win_x, &gt_drag_win_y)) return 0;
+    // The return value is the button mask, not success: ignore it.
+    SDL_GetGlobalMouseState(&gt_drag_mouse_x, &gt_drag_mouse_y);
+    gt_dragging = 1;
+    return 1;
+}
+
+void gt_update_window_drag(void) {
+    if (!gt_dragging) return;
+    int count = 0;
+    SDL_Window **windows = SDL_GetWindows(&count);
+    if (!windows || count <= 0) {
+        gt_dragging = 0;
+        return;
+    }
+    float mx = gt_drag_mouse_x;
+    float my = gt_drag_mouse_y;
+    SDL_GetGlobalMouseState(&mx, &my);
+    int dx = (int)(mx - gt_drag_mouse_x);
+    int dy = (int)(my - gt_drag_mouse_y);
+    SDL_SetWindowPosition(windows[0], gt_drag_win_x + dx, gt_drag_win_y + dy);
+}
+
+void gt_end_window_drag(void) {
+    gt_dragging = 0;
 }
