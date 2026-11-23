@@ -36,6 +36,8 @@
 // SDL3, declared by hand: this file is compiled on its own, and the gfx
 // package supplies the SDL it needs at link time.
 typedef struct SDL_Window SDL_Window;
+typedef struct SDL_Surface SDL_Surface;
+typedef struct SDL_IOStream SDL_IOStream;
 typedef struct SDL_Rect {
     int x, y, w, h;
 } SDL_Rect;
@@ -50,6 +52,10 @@ extern char *SDL_GetPrimarySelectionText(void);
 extern bool SDL_SetPrimarySelectionText(const char *text);
 extern bool SDL_OpenURL(const char *url);
 extern void SDL_free(void *mem);
+extern bool SDL_SetWindowIcon(SDL_Window *window, SDL_Surface *icon);
+extern void SDL_DestroySurface(SDL_Surface *surface);
+extern SDL_IOStream *SDL_IOFromConstMem(const void *mem, size_t size);
+extern SDL_Surface *SDL_LoadBMP_IO(SDL_IOStream *src, bool closeio);
 
 struct gt_slice_in {
     const uint8_t *data;
@@ -194,6 +200,25 @@ int32_t gt_set_borderless(int32_t on) {
     SDL_Window **windows = SDL_GetWindows(&count);
     if (!windows || count <= 0) return 0;
     return SDL_SetWindowBordered(windows[0], on == 0);
+}
+
+// The window icon, for the taskbar and the window switcher. The bitmap is
+// embedded in the executable, so there is no file to find at run time.
+// Wayland ignores this (the icon comes from the .desktop file), and macOS
+// takes a plain executable's dock icon from its bundle.
+int32_t gt_set_window_icon(struct gt_slice_in bmp) {
+    if (bmp.len <= 0 || bmp.data == NULL) return 0;
+    int count = 0;
+    SDL_Window **windows = SDL_GetWindows(&count);
+    if (!windows || count <= 0) return 0;
+    SDL_IOStream *io = SDL_IOFromConstMem(bmp.data, (size_t)bmp.len);
+    if (!io) return 0;
+    // closeio: the stream reads from the embedded bytes and is ours to free.
+    SDL_Surface *icon = SDL_LoadBMP_IO(io, true);
+    if (!icon) return 0;
+    bool ok = SDL_SetWindowIcon(windows[0], icon);
+    SDL_DestroySurface(icon);
+    return ok ? 1 : 0;
 }
 
 // Idle pacing for the frame loop, which would otherwise spin when there is

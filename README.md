@@ -84,7 +84,8 @@ The window is borderless. Drag the empty part of the tab sidebar, or hold
 
 ## Features
 
-- **Tabs** in a wider vertical sidebar that auto-hides when only one is open.
+- **Tabs** in a wider vertical sidebar that auto-hides when only one is open. Double-clicking the empty part of the sidebar opens a new tab.
+- **Window icon**: an embedded 128×128 prompt tile, set through SDL for the taskbar and the window switcher.
 - **Scrollback** of up to 10,000 lines per tab, with viewport anchoring while output arrives. All tabs together stay under a fixed memory budget (~130 MB of cells), and the tab with the most history gives half of it back when they exceed it.
 - **Smooth scrolling**: high-resolution touchpad/wheel deltas move the viewport in sub-line pixels instead of jumping by whole lines. After the input pauses, the viewport coasts with a short frame-rate-independent momentum decay. The deltas are used with the sign the platform reports, so a desktop with natural scrolling behaves as the desktop configured it.
 - **Selection**: drag, kitty-style double-click word selection, triple-click for a line, and copy with `Ctrl+Shift+C` / `Ctrl+Insert`. Dragging past the top or bottom edge scrolls the view and keeps extending the selection.
@@ -147,11 +148,12 @@ src/
   search_ui.goose  the search bar's editing and navigation
   pty.goose        PTY and SDL helper bindings
   pty_helper.c     forkpty, non-blocking I/O, IME area, SDL hooks
-assets/            JuliaMono primary + JetBrains Mono fallback and licenses
+assets/            JuliaMono primary + JetBrains Mono fallback, the window icon, licenses
 ```
 
 ## Limitations
 
+- The window icon is set through SDL, which reaches X11 taskbars; Wayland takes it from a `.desktop` file, and an unsigned macOS binary from its bundle.
 - OSC 52 reads are disabled by design; programs can only set the clipboard.
 - Links are restricted to `http`, `https` and `mailto` before being handed to the desktop.
 - CJK and emoji outside the baked ranges still fall back to `?`; adding a wide-glyph face is the next font step.

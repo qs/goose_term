@@ -6,6 +6,8 @@ namespace pty;
 
 import std;
 
+let ICON_BMP: const u8[:] = embed_file("../assets/icon.bmp");
+
 struct Pty {
     fd: i32 = -1,
     pid: i32 = -1,
@@ -19,6 +21,7 @@ extern fn gt_read_pty(master_fd: i32, buf: u8[:], max_len: i32) -> i32;
 extern fn gt_write_pty(master_fd: i32, buf: const u8[:], len: i32) -> i32;
 extern fn gt_close_pty(master_fd: i32, child_pid: i32);
 extern fn gt_set_borderless(on: i32) -> i32;
+extern fn gt_set_window_icon(bmp: const u8[:]) -> i32;
 extern fn gt_set_fullscreen(on: i32) -> i32;
 extern fn gt_begin_window_drag() -> i32;
 extern fn gt_update_window_drag();
@@ -74,6 +77,13 @@ fn close(p: Pty&) {
 // Ask SDL to drop the window decorations.
 fn set_borderless(on: bool) {
     gt_set_borderless(if on { 1 } else { 0 });
+}
+
+// The bitmap the window manager shows for the app in the taskbar and the
+// window switcher. False where the platform does not take one: Wayland reads
+// it from the .desktop file, and a plain macOS binary from its bundle.
+fn set_window_icon() -> bool {
+    return gt_set_window_icon(ICON_BMP) != 0;
 }
 
 // Desktop fullscreen, or the borderless window again.

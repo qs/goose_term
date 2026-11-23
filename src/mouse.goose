@@ -2,9 +2,9 @@
 // borderless window drag, text selection with its edge auto-scroll, link
 // clicks, wheel scrolling, and reporting to programs that asked for the mouse.
 //
-// Everything that belongs to the terminal itself (pasting, zooming, closing a
-// tab) comes back to main as an Intent, so this module never has to call into
-// the window loop.
+// Everything that belongs to the terminal itself (pasting, zooming, opening or
+// closing a tab) comes back to main as an Intent, so this module never has to
+// call into the window loop.
 
 namespace mouse;
 
@@ -32,10 +32,15 @@ struct State {
     drag_pending: bool = false,
     press_x: f32 = 0.0,
     press_y: f32 = 0.0,
+    // The grid cell the last press landed on. A held button only extends the
+    // selection once the pointer leaves it, so a double-click's word stays.
+    press_col: i64 = -1,
+    press_row: i64 = -1,
 }
 
 enum Intent {
     None,
+    NewTab,
     ZoomIn,
     ZoomOut,
     CloseTab,
@@ -84,7 +89,8 @@ fn sidebar_grip(mp: float2, sz: int2, show_sidebar: bool, r: renderer::Renderer&
 
 // True when the sidebar owns this position and handled it.
 fn sidebar_click(mp: float2, sz: int2, show_sidebar: bool, r: renderer::Renderer&,
-                 tabs: tab::Tab[:], active: i64&, intent: Intent&, arg: i64&) -> bool {
+                 tabs: tab::Tab[:], active: i64&, clicks: i64, intent: Intent&,
+                 arg: i64&) -> bool {
     if !show_sidebar { return false; }
     let sw = renderer::sidebar_width(r, sz.x);
     if mp.x >= sw { return false; }
@@ -100,6 +106,11 @@ fn sidebar_click(mp: float2, sz: int2, show_sidebar: bool, r: renderer::Renderer
             intent = Intent.CloseTab;
             arg = idx;
         }
+    } else if clicks >= 2 && gfx::mouse_pressed(gfx::MOUSE_LEFT) {
+        // Double-clicking the empty part of the tab strip opens a tab, the
+        // way a browser's tab bar does.
+        scroll::stop();
+        intent = Intent.NewTab;
     }
     return true;
 }
@@ -217,7 +228,7 @@ fn update(st: State&, tabs: tab::Tab[:], active: i64&, pool: slice_pool<buffer::
         st.drag_pending = true;
     }
 
-    if sidebar_click(mp, sz, show_sidebar, r, tabs, active, intent, arg) {
+    if sidebar_click(mp, sz, show_sidebar, r, tabs, active, st.click_count, intent, arg) {
         return intent, arg, intent != Intent.None;
     }
 
@@ -251,6 +262,8 @@ fn update(st: State&, tabs: tab::Tab[:], active: i64&, pool: slice_pool<buffer::
 
     if gfx::mouse_pressed(gfx::MOUSE_LEFT) && inside {
         scroll::stop();
+        st.press_col = col;
+        st.press_row = row;
         if st.click_count >= 3 {
             tab::selection_line(tabs[active], abs);
         } else if st.click_count == 2 {
@@ -265,17 +278,25 @@ fn update(st: State&, tabs: tab::Tab[:], active: i64&, pool: slice_pool<buffer::
         // Dragging past the top or bottom edge scrolls a line per frame and
         // keeps the selection endpoint on the line that came into view.
         var line = abs;
+        var scrolled = false;
         let bottom = origin.y + tabs[active].term.rows * cs.y;
         if mp.y < origin.y {
             if scroll::by(tabs[active], 1, cs.y) { changed = true; }
             line = tab::first_line(tabs[active]);
+            scrolled = true;
         } else if mp.y >= bottom {
             if scroll::by(tabs[active], -1, cs.y) { changed = true; }
             line = tab::first_line(tabs[active]) + tabs[active].term.rows - 1;
+            scrolled = true;
         }
-        if tabs[active].sel_line != line || tabs[active].sel_col != col {
-            tab::selection_extend(tabs[active], line, col);
-            changed = true;
+        // A word or line selection spans more than the clicked cell, so
+        // extending it to the press position would shrink it back to one
+        // cell. Only a pointer that has left that cell extends.
+        if scrolled || col != st.press_col || row != st.press_row {
+            if tabs[active].sel_line != line || tabs[active].sel_col != col {
+                tab::selection_extend(tabs[active], line, col);
+                changed = true;
+            }
         }
     }
     if gfx::mouse_released(gfx::MOUSE_LEFT) { st.selecting = false; }

@@ -587,6 +587,7 @@ fn main() {
     defer gfx::close();
 
     pty::set_borderless(true);
+    pty::set_window_icon();
     gfx::text_input(true);
 
     guard renderer::init(rend, font_px) else {
@@ -619,6 +620,7 @@ fn main() {
         if mouse_moved { dirty = true; }
         if active != before_active { update_title(); dirty = true; }
         match intent {
+            NewTab => { spawn_tab(); },
             ZoomIn => { change_font(1.0); },
             ZoomOut => { change_font(-1.0); },
             CloseTab => { close_tab_at(arg); },
