@@ -34,9 +34,18 @@ const MODE_MOUSE_MOVE: u32 = 128;
 const MODE_MOUSE_UTF8: u32 = 256;
 const MODE_MOUSE_SGR: u32 = 512;
 const MODE_FOCUS_EVENTS: u32 = 1024;
+// DECCKM: application cursor keys. Full-screen programs such as less and vim
+// turn it on with smkx (CSI ? 1 h) and then expect SS3 arrows.
+const MODE_APP_CURSOR: u32 = 2048;
 
-const MAX_LINKS: i64 = 64;
-const LINK_DATA_MAX: i64 = 16384;
+// Room for every URL a long session prints: tools such as Claude Code attach
+// one per link, the table is never reused, and a small one would quietly stop
+// attaching links partway through a session.
+const MAX_LINKS: i64 = 512;
+const LINK_DATA_MAX: i64 = 65536;
+
+// The longest plain-text URL a click will collect from the grid.
+const URL_MAX: i64 = 2048;
 
 // One character cell: code point, resolved colors, attributes, and a
 // combining mark drawn over the same cell. A cp of 0 marks the second half
@@ -71,6 +80,10 @@ struct Terminal {
     attrs: u8 = 0,
     wrap_pending: bool = false,
     modes: u32 = 5,
+    // The modifyOtherKeys level the program asked for (CSI > 4 ; n m). Level
+    // 2 wants modified Enter, Tab and friends reported distinctly, which is
+    // what makes Shift+Enter a new line rather than a submit in Claude Code.
+    other_keys: i32 = 0,
 
     // Alternate screen (`CSI ? 1049 h`): the normal grid and cursor are
     // parked in main_* while the full-screen app draws on a fresh grid.
@@ -87,9 +100,9 @@ struct Terminal {
 
     // OSC 8 hyperlinks are interned per terminal so a cell only stores a
     // small id. This table lives as long as the cells that refer to it.
-    link_data: u8[16384] = [0; 16384],
-    link_off: i64[64] = [0; 64],
-    link_len: i64[64] = [0; 64],
+    link_data: u8[65536] = [0; 65536],
+    link_off: i64[512] = [0; 512],
+    link_len: i64[512] = [0; 512],
     nlinks: i64 = 0,
     link_bytes: i64 = 0,
     link_id: u16 = 0,
@@ -126,6 +139,7 @@ fn init(t: Terminal&, pool: slice_pool<Cell>&, cols: i64, rows: i64) {
     t.attrs = 0;
     t.wrap_pending = false;
     t.modes = MODE_WRAP | MODE_CURSOR_VISIBLE;
+    t.other_keys = 0;
     t.alt_active = false;
     t.nlinks = 0;
     t.link_bytes = 0;
@@ -233,6 +247,184 @@ fn link_uri(t: Terminal&, id: u16, out: u8[>..]&) {
         out.push(t.link_data[t.link_off[i] + k]);
         k++;
     }
+}
+
+// A run of cells in absolute lines: the text of one URL, or the cells of one
+// hyperlink. The renderer uses it to underline what the pointer is on.
+struct Span {
+    ok: bool = false,
+    line0: i64 = 0,
+    col0: i64 = 0,
+    line1: i64 = 0,
+    col1: i64 = 0,
+}
+
+fn span_has(s: Span, line: i64, col: i64) -> bool {
+    if !s.ok || line < s.line0 || line > s.line1 { return false; }
+    if line == s.line0 && col < s.col0 { return false; }
+    if line == s.line1 && col > s.col1 { return false; }
+    return true;
+}
+
+// The cells that carry one OSC 8 hyperlink id, from the start of its run on
+// this line (or the row above, when it wrapped) to its end.
+fn link_span(t: Terminal&, pool: slice_pool<Cell>&, line: i64, col: i64, id: u16,
+             span: Span&) {
+    span.ok = false;
+    if id == 0 { return; }
+    let last = t.hist_count + t.rows - 1;
+    if line < 0 || line > last || col < 0 || col >= t.cols { return; }
+
+    var l0 = line;
+    var c0 = col;
+    while c0 > 0 && cell_at_abs(t, pool, l0, c0 - 1).link == id { c0 -= 1; }
+    while c0 == 0 && l0 > 0 && cell_at_abs(t, pool, l0 - 1, t.cols - 1).link == id {
+        l0 -= 1;
+        c0 = t.cols - 1;
+        while c0 > 0 && cell_at_abs(t, pool, l0, c0 - 1).link == id { c0 -= 1; }
+    }
+
+    var l1 = line;
+    var c1 = col;
+    while c1 + 1 < t.cols && cell_at_abs(t, pool, l1, c1 + 1).link == id { c1 += 1; }
+    while c1 == t.cols - 1 && l1 < last && cell_at_abs(t, pool, l1 + 1, 0).link == id {
+        l1 += 1;
+        c1 = 0;
+        while c1 + 1 < t.cols && cell_at_abs(t, pool, l1, c1 + 1).link == id { c1 += 1; }
+    }
+    span = Span { ok: true, line0: l0, col0: c0, line1: l1, col1: c1 };
+}
+
+// --- plain-text URLs -------------------------------------------------------
+
+// Most programs, Claude Code included, print a URL as text rather than as an
+// OSC 8 hyperlink. The cell under the pointer belongs to a run of non-space
+// cells; when that run is an http(s) or mailto target, a click opens it.
+
+fn url_char(cp: u32) -> bool {
+    if cp < 33 || cp == 127 { return false; }
+    if cp == '"' || cp == '\'' || cp == '<' || cp == '>' || cp == '`' { return false; }
+    return true;
+}
+
+fn starts_with_at(s: const u8[:], at: i64, prefix: const u8[:]) -> bool {
+    if at < 0 || at + prefix.len > s.len { return false; }
+    var i = 0;
+    while i < prefix.len {
+        if s[at + i] != prefix[i] { return false; }
+        i++;
+    }
+    return true;
+}
+
+fn url_scheme_at(s: const u8[:], at: i64) -> bool {
+    starts_with_at(s, at, "http://") || starts_with_at(s, at, "https://") ||
+        starts_with_at(s, at, "mailto:")
+}
+
+fn url_trailer(b: u8) -> bool {
+    b == '.' || b == ',' || b == ';' || b == ':' || b == '!' || b == '?' ||
+        b == ')' || b == ']' || b == '}' || b == '\'' || b == '"'
+}
+
+// Punctuation a URL may be wrapped in, as in "(https://example.com)". Each of
+// these is one byte and one cell, so skipping them indexes cells directly.
+fn url_lead(b: u8) -> bool {
+    b == '(' || b == '[' || b == '{' || b == '<' || b == '"' || b == '\''
+}
+
+// The cell `i` of a run that starts at (line, col) and continues at column 0
+// of each row below it, once the run has filled the row above.
+fn run_cell(line: i64, col: i64, cols: i64, i: i64) -> i64, i64 {
+    let first_len = cols - col;
+    if i < first_len { return line, col + i; }
+    let rem = i - first_len;
+    return line + 1 + rem / cols, rem % cols;
+}
+
+// The URL that covers the cell at absolute line `clicked`, column `col`, read
+// from the printed text. A URL wider than the window wraps onto the next row,
+// so the run is joined across a row boundary when it reaches the right edge.
+// On success `out` holds the target and `span` the cells that spell it; on
+// failure `out` may still hold the surrounding run of text.
+fn url_span(t: Terminal&, pool: slice_pool<Cell>&, clicked: i64, col: i64,
+            out: u8[>..]&, span: Span&) -> bool {
+    span.ok = false;
+    out.clear();
+    let last = t.hist_count + t.rows - 1;
+    if clicked < 0 || clicked > last || col < 0 || col >= t.cols { return false; }
+    var line = clicked;
+
+    var x0 = col;
+    // The pointer on the second half of a wide glyph means the glyph itself.
+    if cell_at_abs(t, pool, line, x0).cp == 0 && x0 > 0 { x0 -= 1; }
+    if !url_char(cell_at_abs(t, pool, line, x0).cp) { return false; }
+
+    var start = x0;
+    while start > 0 && url_char(cell_at_abs(t, pool, line, start - 1).cp) { start -= 1; }
+    // A row that starts mid-URL continues a run that filled the row above.
+    while start == 0 && line > 0 && url_char(cell_at_abs(t, pool, line - 1, t.cols - 1).cp) {
+        line -= 1;
+        start = t.cols - 1;
+        while start > 0 && url_char(cell_at_abs(t, pool, line, start - 1).cp) { start -= 1; }
+    }
+    let run_line = line;
+    let run_col = start;
+
+    var run_cells = 0;
+    var cur = line;
+    var x = start;
+    while cur <= last && out.len < URL_MAX {
+        var ended = false;
+        while x < t.cols {
+            let c = cell_at_abs(t, pool, cur, x);
+            if !url_char(c.cp) { ended = true; break; }
+            push_utf8(out, c.cp);
+            if c.cp2 != 0 { push_utf8(out, c.cp2); }
+            run_cells += 1;
+            x++;
+        }
+        if ended || cur >= last { break; }
+        // The run filled the row: continue below only when it does there too.
+        if !url_char(cell_at_abs(t, pool, cur + 1, 0).cp) { break; }
+        cur += 1;
+        x = 0;
+    }
+
+    // Sentence punctuation and a closing bracket belong to the prose, not to
+    // the URL.
+    var trimmed = 0;
+    while out.len > 0 && url_trailer(out[out.len - 1]) {
+        out.resize(out.len - 1, 0);
+        trimmed += 1;
+    }
+
+    // Only wrapping punctuation may lead into the scheme; a word before it
+    // means the run is prose that merely contains a link.
+    var begin = -1;
+    var i = 0;
+    while i < out.len && i < 8 {
+        if url_scheme_at(out, i) { begin = i; break; }
+        if !url_lead(out[i]) { return false; }
+        i++;
+    }
+    if begin < 0 { return false; }
+    if begin > 0 {
+        var shifted: u8[>..] = [];
+        shifted.append(out[begin..]);
+        out.clear();
+        out.append(shifted);
+    }
+    if out.len == 0 { return false; }
+
+    // The skipped lead and the trimmed tail are one byte and one cell each,
+    // so they count cells from the start of the run.
+    let used = run_cells - trimmed;
+    if used <= begin { return false; }
+    let l0, c0 = run_cell(run_line, run_col, t.cols, begin);
+    let l1, c1 = run_cell(run_line, run_col, t.cols, used - 1);
+    span = Span { ok: true, line0: l0, col0: c0, line1: l1, col1: c1 };
+    return true;
 }
 
 // --- alternate screen ------------------------------------------------------
@@ -697,6 +889,7 @@ fn reset(t: Terminal&, pool: slice_pool<Cell>&) {
     t.attrs = 0;
     t.wrap_pending = false;
     t.modes = MODE_WRAP | MODE_CURSOR_VISIBLE;
+    t.other_keys = 0;
 }
 
 // Reallocate one grid for a new geometry, keeping the overlapping text.

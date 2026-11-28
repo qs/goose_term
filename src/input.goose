@@ -20,9 +20,16 @@ fn modifier(mods: i32) -> i64 {
     m
 }
 
-fn arrow(out: u8[>..]&, final: u8, mods: i32) {
+fn arrow(out: u8[>..]&, final: u8, mods: i32, app_cursor: bool) {
     let m = modifier(mods);
     out.push(ESC);
+    // DECCKM: a full-screen program that sent smkx (CSI ? 1 h) reads SS3
+    // arrows, and does not bind the CSI form at all.
+    if m == 1 && app_cursor {
+        out.push('O');
+        out.push(final);
+        return;
+    }
     out.push('[');
     if m == 1 {
         out.push(final);
@@ -34,9 +41,16 @@ fn arrow(out: u8[>..]&, final: u8, mods: i32) {
     }
 }
 
-fn home_end(out: u8[>..]&, final: u8, mods: i32) {
+fn home_end(out: u8[>..]&, final: u8, mods: i32, app_cursor: bool) {
     let m = modifier(mods);
     out.push(ESC);
+    // Home and End follow the cursor keys into SS3 in application mode; that
+    // is the \EOH / \EOF their terminfo entries name.
+    if m == 1 && app_cursor {
+        out.push('O');
+        out.push(final);
+        return;
+    }
     out.push('[');
     if m > 1 {
         out.push('1');
@@ -44,6 +58,21 @@ fn home_end(out: u8[>..]&, final: u8, mods: i32) {
         format(out, m);
     }
     out.push(final);
+}
+
+// xterm's modifyOtherKeys form for a key that carries modifiers:
+// CSI 27 ; modifier ; key ~. It is how Enter keeps its Shift and Ctrl apart
+// from a bare Return, which is what a multi-line prompt needs.
+fn modified(out: u8[>..]&, key: i64, mods: i32) {
+    out.push(ESC);
+    out.push('[');
+    out.push('2');
+    out.push('7');
+    out.push(';');
+    format(out, modifier(mods));
+    out.push(';');
+    format(out, key);
+    out.push('~');
 }
 
 fn tilde(out: u8[>..]&, code: i64, mods: i32) {
@@ -82,23 +111,39 @@ fn function_key(out: u8[>..]&, n: i64) {
 }
 
 // Translate one key event. False when the key is ordinary typing, which the
-// EVENT_TEXT events already carry.
-fn encode_key(out: u8[>..]&, scancode: i32, keycode: i32, mods: i32) -> bool {
+// EVENT_TEXT events already carry. `other_keys` is the program's
+// modifyOtherKeys level and `app_cursor` its DECCKM state, so Enter and the
+// cursor keys follow whatever the program asked for.
+fn encode_key(out: u8[>..]&, scancode: i32, keycode: i32, mods: i32,
+              other_keys: i32, app_cursor: bool) -> bool {
     let name = gfx::key_name(scancode);
     let ctrl = (mods & gfx::MOD_CTRL) != 0;
     let alt = (mods & gfx::MOD_ALT) != 0;
 
-    if name == "Up" { arrow(out, 'A', mods); return true; }
-    if name == "Down" { arrow(out, 'B', mods); return true; }
-    if name == "Right" { arrow(out, 'C', mods); return true; }
-    if name == "Left" { arrow(out, 'D', mods); return true; }
-    if name == "Home" { home_end(out, 'H', mods); return true; }
-    if name == "End" { home_end(out, 'F', mods); return true; }
+    if name == "Up" { arrow(out, 'A', mods, app_cursor); return true; }
+    if name == "Down" { arrow(out, 'B', mods, app_cursor); return true; }
+    if name == "Right" { arrow(out, 'C', mods, app_cursor); return true; }
+    if name == "Left" { arrow(out, 'D', mods, app_cursor); return true; }
+    if name == "Home" { home_end(out, 'H', mods, app_cursor); return true; }
+    if name == "End" { home_end(out, 'F', mods, app_cursor); return true; }
     if name == "Insert" { tilde(out, 2, mods); return true; }
     if name == "Delete" { tilde(out, 3, mods); return true; }
     if name == "PageUp" { tilde(out, 5, mods); return true; }
     if name == "PageDown" { tilde(out, 6, mods); return true; }
-    if name == "Return" || name == "Enter" { out.push(13); return true; }
+    if name == "Return" || name == "Enter" {
+        if other_keys >= 1 &&
+           (mods & (gfx::MOD_SHIFT | gfx::MOD_CTRL | gfx::MOD_ALT)) != 0 {
+            modified(out, 13, mods);
+        } else if alt {
+            // Meta+Enter is the spelling that predates modifyOtherKeys, and
+            // the one readline-era programs expect from Alt.
+            out.push(ESC);
+            out.push(13);
+        } else {
+            out.push(13);
+        }
+        return true;
+    }
     if name == "Backspace" { out.push(127); return true; }
     if name == "Tab" {
         if (mods & gfx::MOD_SHIFT) != 0 {

@@ -38,6 +38,10 @@ struct Parser {
     osc_esc: bool = false,
     title: u8[..128] = [],
     title_changed: bool = false,
+    // Bytes the program asked for in a query (a capability reply). The window
+    // loop writes them to that tab's PTY once this read is parsed.
+    reply: u8[64] = [0; 64],
+    reply_len: i64 = 0,
     // The decoded OSC 52 payload is written into the front of `osc` in place
     // (it is always shorter than the base64 that produced it) and handed to
     // the clipboard as soon as the sequence completes, before the next OSC
@@ -284,6 +288,16 @@ fn dispatch(p: Parser&, t: buffer::Terminal&, pool: slice_pool<buffer::Cell>&, f
     if p.prefix != 0 {
         if p.prefix == '?' && (final == 'h' || final == 'l') {
             set_modes(p, t, pool, final == 'h');
+        } else if p.prefix == '>' && final == 'm' {
+            set_other_keys(p, t);
+        } else if p.prefix == '?' && final == 'u' && p.nparams == 1 && p.params[0] == 0 {
+            // The kitty keyboard protocol's capability query. Answering it is
+            // what gets extended keys switched on at all: Claude Code only
+            // enables modifyOtherKeys (CSI > 4 ; 2 m) for a terminal that
+            // replies, and only then can Shift+Enter differ from Enter. The
+            // reply claims the protocol with no flags set; the keys it then
+            // asks for are reported through modifyOtherKeys.
+            queue_reply(p, "\x1b[?0u");
         }
         p.state = State.Ground;
         return;
@@ -345,6 +359,24 @@ fn dispatch(p: Parser&, t: buffer::Terminal&, pool: slice_pool<buffer::Cell>&, f
     p.state = State.Ground;
 }
 
+fn set_other_keys(p: Parser&, t: buffer::Terminal&) {
+    if param_raw(p, 0) != 4 { return; }
+    // CSI > 4 ; level m. Level 0 turns it off, 1 lets the keys that normally
+    // carry no modifier (Return) report one, and 2 reports modifiers for every
+    // key. A missing level means xterm's default, 1.
+    let level = if p.nparams >= 2 { param_raw(p, 1) } else { 1 };
+    t.other_keys = clamp(level, 0, 2) as i32;
+}
+
+fn queue_reply(p: Parser&, bytes: const u8[:]) {
+    for b in bytes {
+        if p.reply_len < p.reply.len {
+            p.reply[p.reply_len] = b;
+            p.reply_len += 1;
+        }
+    }
+}
+
 fn set_modes(p: Parser&, t: buffer::Terminal&, pool: slice_pool<buffer::Cell>&, on: bool) {
     if p.prefix != '?' {
         if param_raw(p, 0) == 4 {
@@ -361,6 +393,11 @@ fn set_modes(p: Parser&, t: buffer::Terminal&, pool: slice_pool<buffer::Cell>&, 
             buffer::set_mode_bit(t, buffer::MODE_CURSOR_VISIBLE, on);
         } else if m == 7 {
             buffer::set_mode_bit(t, buffer::MODE_WRAP, on);
+        } else if m == 1 {
+            // DECCKM. less and vim send smkx on startup and then read SS3
+            // arrows; a CSI arrow is not bound there, so scrolling with the
+            // arrow keys would do nothing.
+            buffer::set_mode_bit(t, buffer::MODE_APP_CURSOR, on);
         } else if m == 1049 || m == 1047 || m == 47 {
             buffer::set_alt_screen(t, pool, on);
         } else if m == 1048 {

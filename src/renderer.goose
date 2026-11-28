@@ -31,6 +31,7 @@ const THEME_SIDEBAR_DIM: u32 = 0x9292B0FF;
 const THEME_CURSOR: u32 = 0x89B4FAFF;
 const THEME_SEARCH_BG: u32 = 0x5B5B2AFF;
 const THEME_SEARCH_FG: u32 = 0xFFFFFFFF;
+const THEME_LINK: u32 = 0x89B4FAFF;
 
 let FONT_DATA: const u8[:] = embed_file("../assets/JuliaMono-Regular.ttf");
 let FALLBACK_DATA: const u8[:] = embed_file("../assets/font.ttf");
@@ -95,6 +96,9 @@ struct View {
     hit_line: i64 = 0,
     hit_start: i64 = 0,
     hit_end: i64 = 0,
+    // The link under the pointer while Ctrl/Cmd is held. Underlining it shows
+    // the click target before the click.
+    hover_link: buffer::Span = buffer::Span { .. },
 }
 
 fn color(c: u32) -> ui::Color {
@@ -284,6 +288,14 @@ fn hit_cell(d: Drawn, view: View, abs: i64, x: i64) -> Drawn {
     return d;
 }
 
+// While Ctrl/Cmd is held over a link, the whole target is underlined and
+// tinted, so the click has a visible target before it happens.
+fn hover_cell(d: Drawn, view: View, abs: i64, x: i64) -> Drawn {
+    if !view.hover_link.ok || !buffer::span_has(view.hover_link, abs, x) { return d; }
+    return Drawn { cp: d.cp, cp2: d.cp2, fg: THEME_LINK, bg: d.bg,
+                   underline: true, bold: d.bold };
+}
+
 // One row of resolved cells, reused between rows and frames.
 var row_buf: Drawn[>..] = [];
 
@@ -317,8 +329,9 @@ fn draw_grid(r: Renderer&, pool: slice_pool<buffer::Cell>&, t: tab::Tab&, ox: f3
         if row_buf.len < t.term.cols { row_buf.resize(t.term.cols, Drawn { .. }); }
         var x = 0;
         while x < t.term.cols {
-            row_buf[x] = hit_cell(drawn_cell(t, pool, abs, x, sel, l0, c0, l1, c1),
-                                  view, abs, x);
+            row_buf[x] = hover_cell(
+                hit_cell(drawn_cell(t, pool, abs, x, sel, l0, c0, l1, c1), view, abs, x),
+                view, abs, x);
             x++;
         }
         x = 0;

@@ -65,6 +65,7 @@ var last_blink = 0.0;
 var last_tick: f64 = 0.0;
 var search_state = search::State { .. };
 var mouse_state = mouse::State { .. };
+var hover_link = buffer::Span { .. };
 var idle_fds: i32[MAX_TABS] = [0; MAX_TABS];
 var target_cols: i64 = 0;
 var target_rows: i64 = 0;
@@ -276,6 +277,12 @@ fn pump_all() {
                 break;
             }
             parser::feed(tabs[i].parser, tabs[i].term, cells, buf[..n]);
+            // A query in that read may owe the program a reply (the kitty
+            // keyboard protocol handshake), which goes back on its PTY.
+            if tabs[i].parser.reply_len > 0 {
+                tab::write_bytes(tabs[i], tabs[i].parser.reply[..tabs[i].parser.reply_len]);
+                tabs[i].parser.reply_len = 0;
+            }
             dirty = true;
             budget -= n;
             if n < want { break; }
@@ -533,11 +540,21 @@ fn handle_events() {
         if e.kind == gfx::EVENT_KEY && e.down {
             if handle_key(e) { continue; }
             var out: u8[>..] = [];
-            if input::encode_key(out, e.scancode, e.keycode, e.mods) && out.len > 0 {
+            var other_keys: i32 = 0;
+            var app_cursor = false;
+            if tabs.len > 0 {
+                other_keys = tabs[active].term.other_keys;
+                app_cursor = buffer::has_mode(tabs[active].term, buffer::MODE_APP_CURSOR);
+            }
+            if input::encode_key(out, e.scancode, e.keycode, e.mods, other_keys,
+                                 app_cursor) && out.len > 0 {
                 send(out);
             }
         } else if e.kind == gfx::EVENT_TEXT {
             if keys::text_is_chord(e) { continue; }
+            // Text input never carries a control character; anything below
+            // space (a Return event, say) is the key path's business.
+            if e.codepoint < 32 || e.codepoint == 127 { continue; }
             var out: u8[>..] = [];
             input::push_text(out, e.codepoint);
             send(out);
@@ -629,6 +646,16 @@ fn main() {
         }
         if !running || tabs.len == 0 { break; }
 
+        // Underline the link under the pointer while Ctrl/Cmd is held, so the
+        // click target is visible before the click. Changing it redraws.
+        let hover = mouse::hover_link(tabs, active, cells, rend, show_sidebar());
+        if hover.ok != hover_link.ok || hover.line0 != hover_link.line0 ||
+           hover.col0 != hover_link.col0 || hover.line1 != hover_link.line1 ||
+           hover.col1 != hover_link.col1 {
+            hover_link = hover;
+            dirty = true;
+        }
+
         update_layout(now);
 
         var dt = now - last_tick;
@@ -680,6 +707,7 @@ fn main() {
                 hit_start: search_state.start,
                 hit_end: search_state.end,
                 search_cursor: search_state.cursor,
+                hover_link: hover_link,
             };
             var q = 0;
             while q < search_state.query.len && q < 128 {

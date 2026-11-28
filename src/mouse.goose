@@ -36,6 +36,14 @@ struct State {
     // selection once the pointer leaves it, so a double-click's word stays.
     press_col: i64 = -1,
     press_row: i64 = -1,
+    // A press on a link: released without leaving the target it opens the
+    // link, moved off it the same press becomes a selection.
+    link_press: bool = false,
+    link_line: i64 = 0,
+    link_col: i64 = 0,
+    link_row: i64 = 0,
+    link_span: buffer::Span = buffer::Span { .. },
+    link_uri: u8[>..] = [],
 }
 
 enum Intent {
@@ -55,14 +63,65 @@ fn note_button(st: State&, e: gfx::Event) {
     if e.down && e.button == gfx::MOUSE_LEFT { st.click_count = e.clicks; }
 }
 
-fn open_link(t: tab::Tab&, id: u16) {
-    if id == 0 { return; }
-    var uri: u8[>..] = [];
-    buffer::link_uri(t.term, id, uri);
+// Only the schemes a terminal should hand to the desktop. Anything else (a
+// file: or javascript: target a program attached to a cell) is ignored.
+fn open_uri(uri: const u8[:]) {
     if starts_with(uri, "http://") || starts_with(uri, "https://") ||
        starts_with(uri, "mailto:") {
         pty::open_url(uri);
     }
+}
+
+// The link target covering a cell: its OSC 8 hyperlink when the program
+// attached one, else a URL printed as plain text. `out` holds the URI and
+// `span` the cells to open on, so a click anywhere in the target works.
+fn target_at(t: tab::Tab&, pool: slice_pool<buffer::Cell>&, line: i64, col: i64,
+             out: u8[>..]&, span: buffer::Span&) -> bool {
+    span.ok = false;
+    out.clear();
+    let c = buffer::cell_at_abs(t.term, pool, line, col);
+    if c.link != 0 {
+        buffer::link_span(t.term, pool, line, col, c.link, span);
+        buffer::link_uri(t.term, c.link, out);
+        return span.ok && out.len > 0;
+    }
+    return buffer::url_span(t.term, pool, line, col, out, span);
+}
+
+// The link under the pointer while Ctrl/Cmd is held: the cells the renderer
+// underlines so it is clear what a click would open. Recomputed every frame;
+// an empty span means there is nothing there to open.
+fn hover_link(tabs: tab::Tab[:], active: i64, pool: slice_pool<buffer::Cell>&,
+              r: renderer::Renderer&, show_sidebar: bool) -> buffer::Span {
+    var span = buffer::Span { .. };
+    if tabs.len == 0 { return span; }
+    let mods = keys::held();
+    if (mods & (gfx::MOD_CTRL | gfx::MOD_GUI)) == 0 { return span; }
+    // A held button owns the pointer: no affordance while selecting or
+    // dragging, and none when the pointer is outside the window.
+    if gfx::mouse_down(gfx::MOUSE_LEFT) || !gfx::mouse_in_window() { return span; }
+
+    let cs = renderer::cell_size(r);
+    let origin = renderer::grid_origin(r, show_sidebar);
+    let sz = gfx::screen_size();
+    let mp = gfx::mouse_pos();
+    if mp.x < origin.x || mp.y < origin.y || mp.x >= sz.x - renderer::PAD ||
+       mp.y >= sz.y - renderer::PAD {
+        return span;
+    }
+    let col = clamp(((mp.x - origin.x) / cs.x) as i64, 0, tabs[active].term.cols - 1);
+    let frac = if tabs[active].term.alt_active { 0.0 } else { tabs[active].scroll_frac };
+    var line = tab::first_line(tabs[active]) + (((mp.y - origin.y + frac) / cs.y) as i64);
+    if line < 0 { line = 0; }
+
+    let c = buffer::cell_at_abs(tabs[active].term, pool, line, col);
+    if c.link != 0 {
+        buffer::link_span(tabs[active].term, pool, line, col, c.link, span);
+        return span;
+    }
+    var uri: u8[>..] = [];
+    buffer::url_span(tabs[active].term, pool, line, col, uri, span);
+    return span;
 }
 
 fn starts_with(s: const u8[:], prefix: const u8[:]) -> bool {
@@ -176,9 +235,12 @@ fn wheel_arrows(t: tab::Tab&, d: f32) {
     while alt_wheel <= -1.0 { lines -= 1; alt_wheel += 1.0; }
     if lines == 0 { return; }
     var out: u8[>..] = [];
-    var n = if lines > 0 { lines } else { -lines };
+    let n = if lines > 0 { lines } else { -lines };
+    // The program asked for arrows in whatever mode it set, so a wheel scroll
+    // in less sends the same SS3 arrows its keyboard would.
+    let app = buffer::has_mode(t.term, buffer::MODE_APP_CURSOR);
     for i in n {
-        if lines > 0 { input::arrow(out, 'A', 0); } else { input::arrow(out, 'B', 0); }
+        if lines > 0 { input::arrow(out, 'A', 0, app); } else { input::arrow(out, 'B', 0, app); }
     }
     tab::write_bytes(t, out);
 }
@@ -241,15 +303,62 @@ fn update(st: State&, tabs: tab::Tab[:], active: i64&, pool: slice_pool<buffer::
     var abs = first + (((mp.y - origin.y + frac) / cs.y) as i64);
     if abs < 0 { abs = 0; }
 
-    // Ctrl+click (Cmd+click on macOS) on an OSC 8 link is the terminal-level
-    // open gesture; it works even while an app is tracking the mouse.
+    // Ctrl+click (Cmd+click on macOS) is the terminal-level open gesture; it
+    // works even while an app is tracking the mouse. An OSC 8 hyperlink on the
+    // cell wins; otherwise a URL printed as plain text is opened, which is how
+    // most programs (Claude Code included) show links.
     let link_mod = (mods & (gfx::MOD_CTRL | gfx::MOD_GUI)) != 0;
     if inside && link_mod && st.click_count == 1 && gfx::mouse_pressed(gfx::MOUSE_LEFT) {
-        let c = buffer::cell_at_abs(tabs[active].term, pool, abs, col);
-        if c.link != 0 {
-            open_link(tabs[active], c.link);
+        var uri: u8[>..] = [];
+        var span = buffer::Span { .. };
+        if target_at(tabs[active], pool, abs, col, uri, span) {
+            open_uri(uri);
             st.last_col = col;
             st.last_row = row;
+            return Intent.None, 0, false;
+        }
+    }
+
+    // A press on a link with no modifier held opens it when the button comes
+    // up still on the target, the way a browser does. This applies even while
+    // a program tracks the mouse, so the link text a full-screen app paints is
+    // clickable like any other. Moving the pointer off the target first turns
+    // the press into a selection, except for an app that owns the mouse: there
+    // a drag is the program's, and only Shift asks the terminal to select.
+    if st.link_press {
+        if !gfx::mouse_down(gfx::MOUSE_LEFT) {
+            st.link_press = false;
+            if inside && buffer::span_has(st.link_span, abs, col) {
+                open_uri(st.link_uri);
+                changed = true;
+            }
+            return Intent.None, 0, changed;
+        }
+        if !buffer::span_has(st.link_span, abs, col) {
+            st.link_press = false;
+            changed = true;
+            if !buffer::wants_mouse(tabs[active].term) {
+                tab::selection_start(tabs[active], st.link_line, st.link_col);
+                st.selecting = true;
+                st.press_col = st.link_col;
+                st.press_row = st.link_row;
+            }
+        } else {
+            return Intent.None, 0, false;
+        }
+    }
+    if inside && !link_mod && st.click_count == 1 &&
+       (mods & (gfx::MOD_SHIFT | gfx::MOD_ALT)) == 0 &&
+       gfx::mouse_pressed(gfx::MOUSE_LEFT) {
+        var uri: u8[>..] = [];
+        var span = buffer::Span { .. };
+        if target_at(tabs[active], pool, abs, col, uri, span) {
+            st.link_press = true;
+            st.link_line = abs;
+            st.link_col = col;
+            st.link_row = row;
+            st.link_span = span;
+            st.link_uri = copy(uri);
             return Intent.None, 0, false;
         }
     }
@@ -260,7 +369,7 @@ fn update(st: State&, tabs: tab::Tab[:], active: i64&, pool: slice_pool<buffer::
         return Intent.None, 0, false;
     }
 
-    if gfx::mouse_pressed(gfx::MOUSE_LEFT) && inside {
+    if gfx::mouse_pressed(gfx::MOUSE_LEFT) && inside && !st.link_press {
         scroll::stop();
         st.press_col = col;
         st.press_row = row;

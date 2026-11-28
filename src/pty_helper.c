@@ -332,7 +332,29 @@ int32_t gt_open_url(struct gt_slice_in url) {
     char copy[4096];
     memcpy(copy, url.data, (size_t)url.len);
     copy[url.len] = 0;
-    return SDL_OpenURL(copy) ? 1 : 0;
+    if (SDL_OpenURL(copy)) return 1;
+#if !defined(__APPLE__)
+    // SDL only grew a Linux implementation of SDL_OpenURL late, and on an
+    // older one it reports failure: every link would go nowhere. Hand the URL
+    // to the desktop's own opener instead. The double fork keeps the launcher
+    // out of our process group and leaves no zombie for the PTY reaping.
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            execlp("xdg-open", "xdg-open", copy, (char *)NULL);
+            execlp("gio", "gio", "open", copy, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 // Borderless windows have no title bar, so nothing in the platform moves them

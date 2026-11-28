@@ -92,8 +92,10 @@ The window is borderless. Drag the empty part of the tab sidebar, or hold
 - **Clipboard**: `Ctrl+Shift+V` / `Shift+Insert` paste with bracketed-paste support. Middle-click pastes the X11/Wayland PRIMARY selection. Pasted text is text: control characters and ESC are dropped, so a clipboard can inject neither escape sequences nor a fake end-of-paste marker. If a program stops reading its input, whatever the PTY could not take is counted on stderr rather than lost silently.
 - **Alternate screen**: `CSI ? 1049 h/l` (also 47 and 1047). Full-screen programs such as vim, less and Claude get their own grid and restore the normal screen on exit.
 - **Mouse reporting**: X10, 1000 (button), 1002 (drag), 1003 (any motion), 1005 (UTF-8 coordinates) and 1006 (SGR). Hold Shift to override reporting and select text locally.
+- **Application cursor keys**: DECCKM (`CSI ? 1 h` / `l`) is honored, so after a full-screen program sends `smkx` (as `less` and `vim` do) the arrows and Home/End go out as SS3, which is what their terminfo entries name.
+- **Disambiguated keys**: the kitty keyboard protocol's capability query (`CSI ? u`) is answered, so a program can switch on xterm's `modifyOtherKeys` (`CSI > 4 ; 2 m`) and get `CSI 27 ; mod ; key ~` for modified keys. Claude Code uses that for `Shift+Enter` (new line) and `Ctrl+Enter`; everything else keeps its usual encoding.
 - **Wheel in full-screen programs**: when a program on the alternate screen does not track the mouse (`less`, `man`, `vim` with the mouse off), the wheel is sent as arrow keys, so its own scrolling still works.
-- **OSC 8 hyperlinks** are attached to cells. Ctrl+click (Cmd+click on macOS) a `http://`, `https://` or `mailto:` link to open it with the desktop handler.
+- **Links**: OSC 8 hyperlinks are attached to cells, and a URL printed as plain text is recognised too, including one wrapped onto the next row. Holding Ctrl (Cmd on macOS) underlines the target under the pointer. A click opens it, whether or not the program is tracking the mouse; Ctrl+click (Cmd+click) does the same and never reaches the program. Dragging off the target selects the text instead — with Shift held when the program owns the mouse. Only `http://`, `https://` and `mailto:` targets are handed to the desktop, through SDL, falling back to `xdg-open` / `gio open` on a Linux build whose SDL has no opener.
 - **OSC 52 clipboard writes** (`OSC 52 ; c ; base64`). Reads are intentionally not implemented.
 - **Scrollback search** with `Ctrl+Shift+F`, case-insensitive, with next/previous and a highlighted hit.
 - **Unicode** through JuliaMono as the primary face, with JetBrains Mono as a fallback. JuliaMono's full-height block elements and tighter line metrics keep Claude/quadrant art aligned without the empty seams a code face leaves.
@@ -155,7 +157,7 @@ assets/            JuliaMono primary + JetBrains Mono fallback, the window icon,
 
 - The window icon is set through SDL, which reaches X11 taskbars; Wayland takes it from a `.desktop` file, and an unsigned macOS binary from its bundle.
 - OSC 52 reads are disabled by design; programs can only set the clipboard.
-- Links are restricted to `http`, `https` and `mailto` before being handed to the desktop.
+- Links are restricted to `http`, `https` and `mailto` before being handed to the desktop. `Shift+Enter` only differs from `Enter` once a program asks for it, as Claude Code does; a program that never asks receives a plain Return.
 - CJK and emoji outside the baked ranges still fall back to `?`; adding a wide-glyph face is the next font step.
 - Middle-click paste reads the X11/Wayland PRIMARY selection, which macOS does not have; there the calls are no-ops and `Cmd+V` is the paste path.
 - The release binaries are not code-signed or notarized. A downloaded macOS build needs a right-click → Open, or `xattr -d com.apple.quarantine goose-term`, the first time.
